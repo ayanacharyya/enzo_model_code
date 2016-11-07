@@ -407,56 +407,73 @@ args, leftovers = parser.parse_known_args()
 
 if args.file is not None:
     fn = args.file
+    print 'Simulation=', fn
 else:
     fn = 'DD0600_lgf' #which simulation to use
-    print 'Simulation not specified. Using default DD0600_lgf.'
+    print 'Simulation not specified. Using default', fn, '. Use --file option to specify simulation.'
 
 if args.om is not None:
     Om_ar = [float(ar) for ar in args.om.split(',')]
+    print 'Omega=', Om_ar
 else:
     Om_ar = [0.5]
-
-if args.line is not None:
-    line = args.line
-else:
-    line = 'OIII5007'# #whose emission map to be made
+    print 'Omega not specified. Using default Omega', Om_ar, '. Use --om option to specify Omega. \
+You can supply , separated multiple omega values.'
 
 if args.res is not None:
     res = float(args.res)
+    print 'res=', res
 else:
     res = 0.5 #kpc
+    print 'Resolution not specified. Using default resolution of', res, 'kpc. Use --res option to specify resolution.'
 
-if args.nhr is not None:
-    nhr = int(args.nhr)
-else:
-    nhr = 100 # no. of bins used to resolve the range lamda +/- 5sigma around emission lines
+if args.map:
+    if args.line is not None:
+        line = args.line
+        print 'line=', line
+    else:
+        line = 'OIII5007'# #whose emission map to be made
+        print 'Line not specified. Using default', line, '. Use --line option to specify line.'
 
-if args.nbin is not None:
-    nbin = int(args.nbin)
-else:
-    nbin = 1000 #no. of bins used to bin the continuum into (without lines)
+if args.ppv:
+    if args.nhr is not None:
+        nhr = int(args.nhr)
+    else:
+        nhr = 100 # no. of bins used to resolve the range lamda +/- 5sigma around emission lines
+    print 'No. of bins used to resolve+/- 5sigma around emission lines=', nhr
 
-if args.vdisp is not None:
-    vdisp = float(args.vdisp)
-else:
-    vdisp = 15 #km/s vel dispersion to be added to emission lines from MAPPINGS while making PPV
+    if args.nbin is not None:
+        nbin = int(args.nbin)
+    else:
+        nbin = 1000 #no. of bins used to bin the continuum into (without lines)
+    print 'No. of bins used to bin the continuum into (without lines)=', nbin
 
-if args.vdel is not None:
-    vdel = float(args.vdel)
-else:
-    vdel = 100 #km/s; vel range in which spectral resolution is higher is sig = 5*vdel/c
-                #so wavelength range of +/- sig around central wavelength of line is binned into further nhr bins
+    if args.vdisp is not None:
+        vdisp = float(args.vdisp)
+    else:
+        vdisp = 15 #km/s vel dispersion to be added to emission lines from MAPPINGS while making PPV
+    print 'Vel dispersion to be added to emission lines=', vdisp, 'km/s'
 
-if args.X is not None:
-    X = float(args.X)
-else:
-    X = 26 #p-p values at which point to extract spectrum from the ppv cube
+    if args.vdel is not None:
+        vdel = float(args.vdel)
+    else:
+        vdel = 100 #km/s; vel range in which spectral resolution is higher is sig = 5*vdel/c
+                    #so wavelength range of +/- sig around central wavelength of line is binned into further nhr bins
+    print 'Vel range in which spectral resolution is higher around central wavelength of line=', vdel, 'km/s'
 
-if args.Y is not None:
-    Y = float(args.Y)
-else:
-    Y = 26 #p-p values at which point to extract spectrum from the ppv cube
+    if getcube:
+        if args.X is not None:
+            X = float(args.X)
+        else:
+            X = 26 #p-p values at which point to extract spectrum from the ppv cube
+        print 'X position at which spectrum to be plotted=', X
 
+        if args.Y is not None:
+            Y = float(args.Y)
+        else:
+            Y = 26 #p-p values at which point to extract spectrum from the ppv cube
+        print 'Y position at which spectrum to be plotted=', Y
+        
 if not args.keepprev:
     plt.close('all')
 
@@ -495,6 +512,8 @@ for i, Om in enumerate(Om_ar):
     elif args.sfr: SFRmap_real, SFRmapQ0 = SFRmaps(s, Om, res, getmap=args.getmap, saveplot = args.saveplot)
     elif args.ppv: ppvcube=spec(s, Om, col_ar[i], getcube=args.getcube, X=X, Y=Y, savecube=args.savecube, saveplot = args.saveplot)
     else: print 'Wrong choice. Choose from:\n --addbpt, --bptpix, --bptrad, --map, --sfr, --ppv'
+if args.saveplot:
+    print 'Saved to path', path
 #-------------------------------------------------------------------------------------------
 print('Done in %s minutes' % ((time.time() - start_time)/60))
 plt.show(block=False)
