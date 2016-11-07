@@ -406,7 +406,7 @@ parser.add_argument("--Y")
 args, leftovers = parser.parse_known_args()
 
 if args.file is not None:
-    fn = float(args.file)
+    fn = args.file
 else:
     fn = 'DD0600_lgf' #which simulation to use
     print 'Simulation not specified. Using default DD0600_lgf.'
@@ -417,7 +417,7 @@ else:
     Om_ar = [0.5]
 
 if args.line is not None:
-    line = float(args.line)
+    line = args.line
 else:
     line = 'OIII5007'# #whose emission map to be made
 
@@ -427,12 +427,12 @@ else:
     res = 0.5 #kpc
 
 if args.nhr is not None:
-    nhr = float(args.nhr)
+    nhr = int(args.nhr)
 else:
     nhr = 100 # no. of bins used to resolve the range lamda +/- 5sigma around emission lines
 
 if args.nbin is not None:
-    nbin = float(args.nbin)
+    nbin = int(args.nbin)
 else:
     nbin = 1000 #no. of bins used to bin the continuum into (without lines)
 
