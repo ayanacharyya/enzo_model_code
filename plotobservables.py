@@ -3,7 +3,7 @@ start_time = time.time()
 import numpy as np
 import subprocess
 from matplotlib import pyplot as plt
-from astropy.io import ascii
+from astropy.io import ascii, fits
 import sys
 from operator import itemgetter
 from scipy.interpolate import interp1d
@@ -13,6 +13,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import argparse as ap
 parser = ap.ArgumentParser(description="observables generating tool")
 import astropy.convolution as con
+import copy
 #------------Reading pre-defined line list-----------------------------
 def readlist():
     target = []
@@ -64,21 +65,28 @@ def gauss(w, f, w0, f0, v, vz):
     f += g
     return f
 #-------------------------------------------------------------------------------------------
-def bpt_pixelwise(s, Om, res, saveplot=False):
+def bpt_pixelwise(s, Om, res, saveplot=False, smooth=False, ker = None, parm=None):
     g,x,y = calcpos(s, galsize, res)
     b=np.linspace(-g/2,g/2,g)
     d = np.sqrt(b[:,None]**2+b**2)
-
+    t = title(fn)+' Galactrocentric-distance color-coded, BPT of model \n\
+for Omega = '+str(Om)+', resolution = '+str(res)+' kpc'
     mapn2 = make2Dmap(s['NII6584'], x, y, g, res)
     mapha = make2Dmap(s['H6562'], x, y, g, res)
     mapo3 = make2Dmap(s['OIII5007'], x, y, g, res)
     maphb = make2Dmap(s['HBeta'], x, y, g, res)
+    
+    if smooth:
+        mapn2, info = smoothmap(mapn2, parm=parm, ker=ker, maskzero=True, addnoise = addnoise, maketheory = maketheory)
+        mapha, info = smoothmap(mapha, parm=parm, ker=ker, maskzero=True, addnoise = addnoise, maketheory = maketheory)
+        mapo3, info = smoothmap(mapo3, parm=parm, ker=ker, maskzero=True, addnoise = addnoise, maketheory = maketheory)
+        maphb, info = smoothmap(maphb, parm=parm, ker=ker, maskzero=True, addnoise = addnoise, maketheory = maketheory)
+        t += info
 
     mapn2 = np.divide(mapn2,mapha)
     mapo3 = np.divide(mapo3,maphb)
-    plt.scatter((np.log10(mapn2)).flatten(),(np.log10(mapo3)).flatten(), s=4, c=d.flatten(), lw=0,vmin=0,vmax=26)
-    plt.title(title(fn)+' Galactrocentric-distance color-coded, BPT of model \n\
-    for Omega = '+str(Om)+', resolution = '+str(res)+' kpc')
+    plt.scatter((np.log10(mapn2)).flatten(),(np.log10(mapo3)).flatten(), s=4, c=d.flatten(), lw=0,vmin=0/res,vmax=13./res)
+    plt.title(t)
     cb = plt.colorbar()
     cb.ax.set_yticklabels(str(res*float(x.get_text())) for x in cb.ax.get_yticklabels())
     cb.set_label('Galactocentric distance (in kpc)')
@@ -157,26 +165,18 @@ def gridoverlay(annotate=False, saveplot=False):
     if saveplot:
         fig.savefig(path+fn+':BPT overlay')
 #-------------------------------------------------------------------------------------------
-def emissionmap(s, Om, res, line, saveplot=False, smooth=False, parm=None, hide=False, addnoise = False):
+def emissionmap(s, Om, res, line, saveplot=False, smooth=False, off=None, ker = None, parm=None, hide=False, addnoise = False, cmin=None, cmax=None, maketheory=False):
     g,x,y = calcpos(s, galsize, res)
-    flux = s[line]/((res*1000)**2)
+    flux = s[line]/((res*1e3)**2) #ergs/s/pc^2
     t = title(fn)+line+' map for Omega = '+str(Om)+', resolution = '+str(res)+' kpc'
     map = make2Dmap(flux, x, y, g, res)
     if smooth:
-        plotmap(map, t, line, 'Log '+line+' surface brightness in erg/s/pc^2', galsize, res, cmin = 29, cmax =36, hide = hide)#
-        map = smoothmap(map, parm=parm)
-        t += '_smeared'
-    if addnoise:
-        try:
-            map = np.random.poisson(lam=map, size=None)
-        except:
-            print 'Could not add noise with lam=map. Trying lam=log10(map)...'
-            map = 10**np.random.poisson(lam=np.log10(map), size=None)
-        t += '_noisy'
-    plotmap(map, t, line, 'Log '+line+' surface brightness in erg/s/pc^2', galsize, res, cmin = 29, cmax =36, hide = hide, saveplot=saveplot)
+        map, info = smoothmap(map, parm=parm, ker=ker, addnoise = addnoise, maketheory = maketheory)
+        t += info
+    map = plotmap(map, t, line, 'Log '+line+' surface brightness in erg/s/pc^2', galsize, res, cmin = cmin, cmax =cmax, hide = hide, saveplot=saveplot)
     return map
 #-------------------------------------------------------------------------------------------
-def SFRmaps(s, Om, reso, getmap=True, saveplot=False, smooth=False, parm=None, hide=False, addnoise = False):
+def SFRmaps(s, Om, reso, getmap=True, saveplot=False, smooth=False, ker = None, off=None, parm=None, hide=False, addnoise = False, cmin=None, cmax=None, maketheory=False):
     flux = s['H6562'] #ergs/s
     lum = s['logQ0'] #log(Q0) in photons/s
     ages = s['age(MYr)']
@@ -200,9 +200,9 @@ def SFRmaps(s, Om, reso, getmap=True, saveplot=False, smooth=False, parm=None, h
         b=np.linspace(-g/2,g/2,g)
         #d = np.sqrt(b[:,None]**2+b**2)
 
-        SFRmapHa = (const/1.37e-12)*make2Dmap(flux, x, y, g, res)/((res)**2) #Msun/yr/kpc^2
-        SFRmapQ0 = const*(1-f_esc)*(1-f_dust)*make2Dmap(lum, x, y, g, res, islog=True)/((res)**2) #Msun/yr/kpc^2
-        SFRmap_real = make2Dmap(masses, x, y, g, res)/((res)**2)
+        SFRmapHa = (const/1.37e-12)*make2Dmap(flux, x, y, g, res)/((res*1e3)**2) #Msun/yr/pc^2
+        SFRmapQ0 = const*(1-f_esc)*(1-f_dust)*make2Dmap(lum, x, y, g, res, islog=True)/((res*1e3)**2) #Msun/yr/pc^2
+        SFRmap_real = make2Dmap(masses, x, y, g, res)/((res*1e3)**2)
         agemap = 1e6*make2Dmap(ages, x, y, g, res, domean=True)
         #SFRmap_real /= agemap #dividing by mean age in the box
         SFRmap_real /= 5e6 #dividing by straight 5M years
@@ -210,47 +210,41 @@ def SFRmaps(s, Om, reso, getmap=True, saveplot=False, smooth=False, parm=None, h
         #SFRmap_comp = SFRmapQ0/SFRmap_real
         #mean.append(np.log10(np.mean(SFRmap_real)))
         t = title(fn)+'SFR map for Omega = '+str(Om)+', resolution = '+str(res)+' kpc'
-        #plotmap(SFRmapHa, t, 'SFRmapHa', 'Log SFR(Ha) density in Msun/yr/pc^2', galsize, res, cmin = -3.5, cmax = 1.6, saveplot = saveplot, hide = hide, islog=False)#        
         if smooth:
-            SFRmapQ0 = smoothmap(SFRmapQ0, parm=parm)
-            SFRmapHa = smoothmap(SFRmapHa, parm=parm)
-            SFRmap_real = smoothmap(SFRmap_real, parm=parm)
-            t += '_smeared'
-            print 'smoothed', np.mean(SFRmapHa), np.std(SFRmapHa) #
-        #plotmap(SFRmapHa, t, 'SFRmapHa', 'Log SFR(Ha) density in Msun/yr/pc^2', galsize, res, cmin = -3.5, cmax = 1.6, saveplot = saveplot, hide = hide, islog=False)#        
-        if addnoise:
-            SFRmapQ0 = np.random.poisson(lam=SFRmapQ0, size=None)
-            SFRmapHa = np.random.poisson(lam=SFRmapHa, size=None)
-            SFRmap_real = np.random.poisson(lam=SFRmap_real, size=None)
-            t += '_noisy'
-            print 'noisy', np.mean(SFRmapHa), np.std(SFRmapHa) #
-        #plotmap(SFRmapHa, t, 'SFRmapHa', 'Log SFR(Ha) density in Msun/yr/pc^2', galsize, res, cmin = -3.5, cmax = 1.6, saveplot = saveplot, hide = hide, islog=False)#        
-        #sys.exit()#
+            SFRmapQ0, info = smoothmap(SFRmapQ0, parm=parm, ker=ker, maskzero=True, addnoise = addnoise, maketheory = maketheory)
+            SFRmapHa, info = smoothmap(SFRmapHa, parm=parm, ker=ker, maskzero=True, addnoise = addnoise, maketheory = maketheory)
+            SFRmap_real = np.ma.masked_where(SFRmap_real<=0., SFRmap_real)
+            t += info
+        else: SFRmapHa = np.ma.masked_where(SFRmapHa<=0., SFRmapHa) #
+        print 'Statistics from SFRHa map:\n', 'Mean=', np.mean(SFRmapHa), 'Std dev=', np.std(SFRmapHa), 'Min=', np.min(SFRmapHa)
         if getmap:
-            plotmap(SFRmapQ0, t, 'SFRmapQ0', 'Log SFR(Q0) density in Msun/yr/pc^2', galsize, res, cmin = -3.5, cmax =1.6, saveplot = saveplot, hide = hide)
-            plotmap(SFRmap_real, t, 'SFRmap_real', 'Log SFR(real) density in Msun/yr/pc^2', galsize, res, cmin = -3.5, cmax = 1.6, saveplot = saveplot, hide = hide)
-            plotmap(SFRmapHa, t, 'SFRmapHa', 'Log SFR(Ha) density in Msun/yr/pc^2', galsize, res, cmin = -3.5, cmax = 1.6, saveplot = saveplot, hide = hide)
-            #plotmap(SFRmap_comp, t, 'Log SFR(Q0)/SFR(real) in Msun/yr/pc^2', galsize, res, islog=False)   
+            SFRmapQ0 = plotmap(SFRmapQ0, t, 'SFRmapQ0', 'Log SFR(Q0) density in Msun/yr/pc^2', galsize, res, cmin = cmin, cmax =cmax, saveplot = saveplot, hide = hide)
+            SFRmap_real = plotmap(SFRmap_real, t, 'SFRmap_real', 'Log SFR(real) density in Msun/yr/pc^2', galsize, res, cmin = cmin, cmax =cmax, saveplot = saveplot, hide = hide)
+            SFRmapHa = plotmap(SFRmapHa, t, 'SFRmapHa', 'Log SFR(Ha) density in Msun/yr/pc^2', galsize, res, cmin = cmin, cmax =cmax, saveplot = saveplot, hide = hide)
+            #SFRmap_comp = plotmap(SFRmap_comp, t, 'Log SFR(Q0)/SFR(real) in Msun/yr/pc^2', galsize, res, islog=False, maketheory=maketheory)   
         else:
             fig = plt.figure(figsize=(8,6))
-            fig.subplots_adjust(hspace=0.7, top=0.85, bottom=0.1, left=0.1, right=0.95)
+            fig.subplots_adjust(hspace=0.7, top=0.9, bottom=0.1, left=0.1, right=0.95)
             ax = plt.subplot(111)
             ax.scatter((np.log10(SFRmap_real)).flatten(),(np.log10(SFRmapQ0)).flatten(), s=4, c='r', lw=0, label='SFR(Q0)')
             ax.scatter((np.log10(SFRmap_real)).flatten(),(np.log10(SFRmapHa)).flatten(), s=4, c='b', lw=0, label='SFR(Ha)')
             #ax.scatter((np.log10(SFRmap_real)).flatten(),(np.log10(SFRmapHa)).flatten(), s=4, c=col_ar[i], lw=0, label=str(res))
             #ax.scatter((np.log10(SFRmap_real)).flatten(),(np.log10(SFRmapHa)).flatten(), s=4, c=d.flatten(), lw=0, label='SFR(Ha)')
             #-----to plot x=y line----------#
-            lims = [np.min([ax.get_xlim(), ax.get_ylim()]), np.max([ax.get_xlim(), ax.get_ylim()])]
+            lims = [min(ax.get_xlim()[0], ax.get_ylim()[0]), max(ax.get_xlim()[1], ax.get_ylim()[1])]
             ax.set_xlim(ax.get_xlim())
             ax.set_ylim(ax.get_ylim())
-            ax.plot(lims, lims, 'k-', alpha=0.75, zorder=0)
+            ax.plot(lims, lims, 'k-', alpha=0.75, zorder=0, label = 'x=y line')
             #-------------------------------#
-            plt.ylabel('Log (Predicted SFR density) in Msun/yr/kpc^2')
-            plt.xlabel('Log (Actual SFR density) in Msun/yr/kpc^2')
-            plt.title('SFR comparison for '+fn+', res '+str(res)+' kpc')
+            t= 'SFR comparison for '+fn+', res '+str(res)+' kpc'
+            if smooth: t += '\n_smeared_'+ker+'_parm'+args.parm
+            plt.ylabel('Log (Predicted SFR density) in Msun/yr/pc^2')
+            plt.xlabel('Log (Actual SFR density) in Msun/yr/pc^2')
+            plt.title(t)
             #plt.colorbar().set_label('Galactocentric distance (in pix)')
-            plt.legend(bbox_to_anchor=(0.35, 0.90), bbox_transform=plt.gcf().transFigure)
-        
+            plt.legend(bbox_to_anchor=(0.35, 0.88), bbox_transform=plt.gcf().transFigure)  
+            if saveplot:
+                fig.savefig(path+title(fn)[:-2]+'_'+t+'.png')
             '''
             ax.scatter(reso,mean,s=4)
             plt.xlabel('res(kpc)')
@@ -274,13 +268,8 @@ def readSB(wmin, wmax):
         funcar.append(interp1d(cw, cf, kind='cubic'))
         #plt.plot(cw, np.divide(cf,5e34),lw=0.5, linestyle='--') #
     return funcar
-#-------------------------------------------------------------------------------------------------
-def spectral_smear(w, f, new_w, vres):
-    func = interp1d(w, f, kind='cubic')
-    new_f = func(new_w)
-    return new_f
 #-------------------------------------------------------------------------------------------
-def spec(s, Om, col, wmin = None, wmax = None, getcube=False, X=None, Y=None, spec_smear=False, plotspec=False, plotintegmap=False, addnoise = False, savecube=False, saveplot=False, smooth=False, parm=None, hide=False):
+def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None, getcube=False, X=None, Y=None, spec_smear=False, plotspec=False, plotintegmap=False, addnoise = False, savecube=False, saveplot=False, smooth=False, ker = None, parm=None, hide=False, cmin=None, cmax=None, maketheory=False):
     wlist, llist = readlist()
     if wmin is None: wmin = wlist[0]-50.
     if wmax is None: wmax = wlist[-1]+50.
@@ -294,30 +283,23 @@ def spec(s, Om, col, wmin = None, wmax = None, getcube=False, X=None, Y=None, sp
         highres = np.linspace(w1, w2, nhr)
         w = np.insert(w, np.where(np.array(w)<w2)[0][-1]+1, highres)
     w = np.sort(w)
-    if spec_smear:
-        '''
+    #-------------------------------------------------------------------------------------------
+    if spec_smear:        
         new_w = [np.min(w)]
         while new_w[-1] < np.max(w):
             new_w.append(new_w[-1]*(1+vres/c))
-        new_w = new_w[:-1] #
-        '''
-        new_w = np.linspace(np.min(w),np.max(w),len(w)/10)
+        new_w = new_w[:-1]
         nwbin = len(new_w) #final no. of bins in wavelength dimension
     else:
         nwbin = len(w)
     #-------------------------------------------------------------------------------------------
-    if getcube:
-        g,x,y = calcpos(s, galsize, res)
-        ppv = np.zeros((g,g,nwbin))
-    else:
-        fl = np.zeros(nwbin)
+    g,x,y = calcpos(s, galsize, res)
+    ppv = np.zeros((g,g,nwbin))
     funcar = readSB(wmin, wmax)
-    if plotspec:
-        fig = plt.figure(figsize=(8,6))
-        fig.subplots_adjust(hspace=0.7, top=0.85, bottom=0.1, left=0.1, right=0.95)
-        ax = plt.subplot(111)
-        for i in wlist:
-            plt.axvline(i,ymin=0.9,c='black')
+    cbarlab = 'Log surface brightness in erg/s/pc^2' #label of color bar
+    if changeunits: 
+        cbarlab = cbarlab[:cbarlab.find(' in ')+4] + 'erg/s/cm^2/A' #label would be ergs/s/pc^2/A if we choose to change units to flambda
+    #-------------------------------------------------------------------------------------------
     for j in range(len(s)):
         vz = float(s['vz'][j])
         a = int(round(s['age(MYr)'][j]))
@@ -327,79 +309,65 @@ def spec(s, Om, col, wmin = None, wmax = None, getcube=False, X=None, Y=None, sp
             flist.append(s[l][j])
         flist = np.multiply(np.array(flist), const)
         for i, fli in enumerate(flist):
-            f = gauss(w, f, wlist[i], fli, vdisp, vz)
-        if spec_smear: f = spectral_smear(w, f, new_w, vres) #to account for spectral resolution limit
-        if getcube:
-            ppv[int(x[j]/res)][int(y[j]/res)][:] += np.divide(f,(s['r_m(pc)'][j]*3.086e18)**2)
-        else:
-            fl += np.divide(f,(s['r_m(pc)'][j]*3.086e18)**2)
-    if spec_smear: w = new_w
-    if getcube:
-        if smooth:
-            ppv = smoothcube(ppv, parm=parm) #spatially and spectrally smooth the PPV using certain parameter set
-        if addnoise:
-            ppv = np.random.poisson(lam=ppv, size=None)    
+            f = gauss(w, f, wlist[i], fli, vdisp, vz) #adding every line flux on top of continuum
+        if spec_smear: 
+            print 'interpolating for', j, 'of', len(s) #
+            f = spectral_smear(w, f, new_w, vres) #to account for spectral resolution limit
+            w = new_w
+        if changeunits:
+            f /= (w*3.086e18**2) #changing units for David Fisher: from ergs/s to ergs/s/A; the extra factor is to make it end up as /cm^2 insted of /pc^2
+        ppv[int(x[j]/res)][int(y[j]/res)][:] += np.divide(f,(res*1e3)**2) #ergs/s/pc^2
+    #-------------------------Now PPV is ready: do whatever with it------------------------------------------------------------------
+    #if smooth: ppv, info = smoothcube(ppv, parm=parm, addnoise = addnoise, maketheory=maketheory) #spatially smooth the PPV using certain parameter set
+    if savecube:
+        for k in range(nwbin):
+            ppv[:,:,k] = plotmap(ppv[:,:,k], 'w slice %.2f A' %w[k], str(w[k]), cbarlab, galsize, res, cmin = cmax, cmax =cmax, hide = True, saveplot=False, maketheory=maketheory)
+            fig.savefig(path+fn+'_cube/map_for_Om='+str(Om_ar[0])+'_slice'+str(k)+info+'.png')
+            plt.close()       
+    #-------------------------------------------------------------------------------------------
+    if plotintegmap:
+        line = 'lambda-integrated wmin='+str(wmin)+', wmax='+str(wmax)+'\n'
+        t = title(fn)+line+' map for Omega = '+str(Om)+', res = '+str(res)+' kpc'
+        map = np.sum(ppv,axis=2)
+        if smooth and 'info' not in locals(): map, info = smoothmap(map, parm=parm, ker=ker, addnoise = addnoise, maketheory=maketheory) #should not need this after smoothcube is working
+        map = plotmap(map, t+info, line, cbarlab, galsize, res, cmin = cmin, cmax =cmax, hide = hide, saveplot=saveplot, maketheory=maketheory)            
+        print 'Returning integrated map as variable "ppvcube"'
+        return map
+    else:
+        fig = plt.figure(figsize=(8,6))
+        fig.subplots_adjust(hspace=0.7, top=0.85, bottom=0.1, left=0.1, right=0.95)
+        ax = plt.subplot(111)
+        for i in wlist:
+            plt.axvline(i,ymin=0.9,c='black')    
+        if addnoise and 'info' not in locals(): #should not need this after smoothcube is working
+            factor = (res*1e3)**2 * flux_ratio * exptime * el_per_phot / (planck * nu * gain)
+            ppv = makenoise(ppv, factor=factor)
+            info = '_noisy'
+        #-------------------------------------------------------------------------------------------
         if plotspec:
             plt.plot(w, np.log10(ppv[X][Y][:]),lw=1, c=col)
-            plt.title('Spectrum at pp '+str(X)+','+str(Y)+' for '+title(fn)+' Nebular + stellar for Om = '+str(Om))
-            if saveplot:
-                fig.savefig(path+fn+':PPV: Nebular+stellar spectrum at ('+str(X)+','+str(Y)+')')
-        if plotintegmap:
-            line = 'lambda-integrated wmin='+str(wmin)+', wmax='+str(wmax)+'\n'
-            t = title(fn)+line+' map for Omega = '+str(Om)+', resolution = '+str(res)+' kpc'
-            map = np.sum(ppv,axis=2)
-            if smooth: map = smoothmap(map, parm=parm)
-            plotmap(map, t, line, 'Log surface brightness in erg/s/pc^2', galsize, res, cmin = -14, cmax =3, hide = hide, saveplot=saveplot)            
-        if savecube:
-            for k in range(nwbin):
-                plotmap(ppv[:,:,k], 'w slice %.2f A' %w[k], str(w[k]), 'Log surface brightness in erg/s/pc^2', galsize, res, cmin = -14, cmax =3, hide = True, saveplot=False)
-                fig.savefig(path+fn+'_cube/map_for_Om='+str(Om_ar[0])+'_slice'+str(k)+'.png')
-                plt.close()       
-    elif plotspec:   
-        if addnoise:
-            fl = np.random.poisson(lam=fl, size=None)
-        plt.plot(w, np.log10(fl),lw=1, c=col)
-        plt.title('Spectrum for total, for '+title(fn)+' Nebular+ stellar for Om = '+str(Om))
-        if saveplot:
-            fig.savefig(path+fn+':Nebular+stellar spectrum log-scale')
-    if plotspec:
-        plt.ylabel(' Log Flux (erg/s/cm^2)')
+            t = 'Spectrum at pp '+str(X)+','+str(Y)+' for '+title(fn)+' Nebular + stellar for Om = '+str(Om)+', res = '+str(res)+' kpc' + info
+        else:
+            plt.plot(w, np.log10(np.sum(ppv,axis=(0,1))),lw=1, c=col)
+            t = 'Spectrum for total, for '+title(fn)+' Nebular+ stellar for Om = '+str(Om)+', res = '+str(res)+' kpc' + info
+        #-------------------------------------------------------------------------------------------
+        plt.title(t)
+        plt.ylabel(cbarlab)
         plt.xlabel('Wavelength (A)')
         #plt.ylim(-0.5,5.5)
         plt.xlim(wmin,wmax)
         if not hide:
             plt.show(block=False)
-    
-    if getcube:
+        if saveplot:
+            fig.savefig(path+t+'.png')
         print 'Returning PPV as variable "ppvcube"'
-        return ppv
-    else:
-        print 'Returning total flux array as variable "ppvcube"'
-        return fl
-            
+        return ppv                
 #-------------------------------------------------------------------------------------------
 def calcpos(s, galsize, res):
     g = int(np.ceil(galsize/res))
     x = (s['x']-1500/2)*0.02 + galsize/2
     y = (s['y']-1500/2)*0.02 + galsize/2
     return g, x, y
-#-------------------------------------------------------------------------------------------
-def smoothmap(map, parm=None):
-    if parm is None:
-        sig, pow, size = 1, 4, 10 #sigma and truncation length of 2D gaussian kernal in pixel units
-    else:
-        sig, pow, size = parm[0], parm[1], parm[2]*parm[0]
-    if size%2 == 0:
-        size += 1 #because kernels need odd integer as size
-    print 'Using parameter set: sig=', sig, ', pow=', pow, ', size=', size, ' pixels'
-    #kernel = con.Gaussian2DKernel(sig, x_size = size, y_size = size)
-    kernel = con.Moffat2DKernel(sig, pow, x_size = size, y_size = size)
-    
-    map = con.convolve(map, kernel, boundary = 'fill', fill_value = 0.0, normalize_kernel=True)
-    return map
-#-------------------------------------------------------------------------------------------
-def smoothcube(cube, parm=None):
-    return cube
 #-------------------------------------------------------------------------------------------
 def make2Dmap(data, xi, yi, gridsize, res, domean=False, islog=False):
     map = np.zeros((gridsize,gridsize))
@@ -418,11 +386,71 @@ def make2Dmap(data, xi, yi, gridsize, res, domean=False, islog=False):
         map = np.divide(map,count)
         map[np.isnan(map)] = 0
     return map 
+#-------------------------------------------------------------------------------------------------
+def spectral_smear(w, f, new_w, vres):
+    func = interp1d(w, f, kind='cubic')
+    new_f = func(new_w)
+    return new_f
 #-------------------------------------------------------------------------------------------
-def plotmap(map, title, savetitle, cbtitle, galsize, res, cmin = 25, cmax = 35, islog=True, saveplot=False, hide=False):    
+def smoothmap(map, parm=None, ker='moff', maskzero=False, addnoise = False, maketheory=False, info=''):
+    if parm is None:
+        sig, pow, size = 1, 4, 10 #sigma and truncation length of 2D gaussian kernal in pixel units
+    else:
+        sig, pow, size = parm[0], parm[1], int(parm[2]*parm[0])
+    if size%2 == 0:
+        size += 1 #because kernels need odd integer as size
+    if ker == 'gauss':
+        kernel = con.Gaussian2DKernel(sig, x_size = size, y_size = size)
+        print 'Using Gaussian kernel.'
+        print 'Using parameter set: FWHM=', sig*2*np.sqrt(2*np.log(2)), ', size=', size, ' pixels.'
+    elif ker == 'moff':
+        kernel = con.Moffat2DKernel(sig, pow, x_size = size, y_size = size)
+        print 'Using Moffat kernel.'
+        print 'Using parameter set: FWHM=', sig*2*np.sqrt(2**(1./pow)-1.), ', pow=', pow, ', size=', size, ' pixels.'
+    else:
+        print 'Kernel not identified. Using moffat. Use --ker <option> to specify kernel, where <option>=gauss OR moff'   
+        sys.exit()
+    map = con.convolve(map, kernel, boundary = 'fill', fill_value = 0.0, normalize_kernel=True)
+    info += '\n_smeared_'+ker+'_parm'+str(parm)
+    if maskzero:
+        map = np.ma.masked_where(map<=0., map)
+    if not maketheory:
+        factor = (res*1e3)**2 * flux_ratio * exptime * el_per_phot / (planck * nu * gain)
+        map *= factor #to get in counts
+        map = np.ma.masked_where(np.log10(map)<0, map) #clip all that have less than 1 count
+        if addnoise: 
+            map = makenoisy(map, factor=1.)
+            info += '_noisy'
+        map /= factor
+        info += '_obs'
+    return map, info
+#-------------------------------------------------------------------------------------------
+def smoothcube(cube, addnoise = False, maketheory = False, parm=None, info=''):
+    for k in range(np.shape(cube)[2]):
+        cube [:,:,k], info = smoothmap(cube[:,:,k], addnoise = addnoise, maketheory = maketheory, parm=parm, info=info)
+    return cube, info
+#-------------------------------------------------------------------------------------------
+def makenoisy(data, factor=None):
+    dummy = copy.copy(data)
+    if factor is None:
+        factor = (res*1e3)**2 * flux_ratio * exptime * el_per_phot / (planck * nu)
+    data *= factor
+    noisydata = np.random.poisson(lam=data, size=None)/factor
+    noisydata = noisydata.astype(float)
+    noise = noisydata - dummy    
+    print 'makenoisy: data', np.mean(dummy), np.std(dummy), np.min(np.ma.masked_where(dummy<=0, dummy)), np.max(dummy) #
+    print 'makenoisy: noisydata', np.mean(noisydata), np.std(noisydata), np.min(np.ma.masked_where(noisydata<=0, noisydata)), np.max(noisydata) #
+    print 'makenoisy: noise', np.mean(noise), np.std(noise), np.min(np.ma.masked_where(noise<=0, noise)), np.max(noise) #    
+    return noisydata
+#-------------------------------------------------------------------------------------------
+def plotmap(map, title, savetitle, cbtitle, galsize, res, cmin = None, cmax = None, islog=True, saveplot=False, hide=False, maketheory=False):    
     fig = plt.figure(figsize=(8,8))
     fig.subplots_adjust(hspace=0.7, top=0.9, bottom=0.1, left=0.1, right=0.9)
     ax = plt.subplot(111)
+    map = np.ma.masked_where(map<0, map)
+    if cmin is None: cmin = np.min(np.log10(map))
+    if cmax is None: cmax = np.max(np.log10(map))     
+    map = np.ma.masked_where(np.log10(map)<cmin, map)
     if islog:
         p = ax.imshow(np.log10(map), cmap='rainbow',vmin=cmin,vmax=cmax)
     else:
@@ -438,10 +466,23 @@ def plotmap(map, title, savetitle, cbtitle, galsize, res, cmin = 25, cmax = 35, 
     if not hide:
         plt.show(block=False)
     if saveplot:
-        fig.savefig(path+fn+':'+savetitle+' map for Omega= '+str(Om_ar[0])+'.png')
+        fig.savefig(path+title+'.png')
+    return map
 #-------------------------------------------------------------------------------------------
 def getfn(outtag,fn,Om):
     return '/Users/acharyya/models/emissionlist'+outtag+'/emissionlist_'+fn+'_Om'+str(Om)+'.txt'
+#-------------------------------------------------------------------------------------------
+def write_fits(filename, data, fill_val=np.nan):
+    hdu = fits.PrimaryHDU(data.filled(fill_val))
+    hdulist = fits.HDUList([hdu])
+    if filename[-5:] != '.fits':
+        filename += '.fits'
+    hdulist.writeto(filename, clobber=True)
+    print 'Written file', filename    
+#-------------------------------------------------------------------------------------------
+def calc_dist(z, H0 = 70.):
+    dist = z*c*1e3/H0 #kpc
+    return dist
 #-------------------End of functions------------------------------------------------------------------------
 #-------------------Begin main code------------------------------------------------------------------------
 col_ar=['m','blue','steelblue','aqua','lime','darkolivegreen','goldenrod','orangered','darkred','dimgray']
@@ -450,6 +491,8 @@ outtag = '_logT4'
 galsize = 26 #kpc 
 c = 3e5 #km/s
 H0 = 70. #km/s/Mpc Hubble's constant
+planck = 6.626e-27 #ergs.sec Planck's constant
+nu = 5e14 #Hz H-alpha frequency to compute photon energy approximately
 f_esc = 0.0
 f_dust = 0.0
 const = 1e0 #to multiply with nebular flux to make it comparable with SB continuum
@@ -475,8 +518,6 @@ parser.add_argument('--getmap', dest='getmap', action='store_true')
 parser.set_defaults(getmap=False)
 parser.add_argument('--ppv', dest='ppv', action='store_true')
 parser.set_defaults(ppv=False)
-parser.add_argument('--getcube', dest='getcube', action='store_true')
-parser.set_defaults(getcube=False)
 parser.add_argument('--plotmap', dest='plotmap', action='store_true')
 parser.set_defaults(plotmap=False)
 parser.add_argument('--plotspec', dest='plotspec', action='store_true')
@@ -495,6 +536,10 @@ parser.add_argument('--keepprev', dest='keepprev', action='store_true')
 parser.set_defaults(keepprev=False)
 parser.add_argument('--hide', dest='hide', action='store_true')
 parser.set_defaults(hide=False)
+parser.add_argument('--changeunits', dest='changeunits', action='store_true')
+parser.set_defaults(changeunits=False)
+parser.add_argument('--maketheory', dest='maketheory', action='store_true')
+parser.set_defaults(maketheory=False)
 
 parser.add_argument("--file")
 parser.add_argument("--om")
@@ -510,8 +555,17 @@ parser.add_argument("--vres")
 parser.add_argument("--X")
 parser.add_argument("--Y")
 parser.add_argument("--parm")
+parser.add_argument("--ker")
 parser.add_argument("--wmin")
 parser.add_argument("--wmax")
+parser.add_argument("--cmin")
+parser.add_argument("--cmax")
+parser.add_argument("--wfits")
+parser.add_argument("--off")
+parser.add_argument("--rad")
+parser.add_argument("--gain")
+parser.add_argument("--exp")
+parser.add_argument("--epp")
 args, leftovers = parser.parse_known_args()
 
 if args.file is not None:
@@ -536,6 +590,27 @@ else:
     arcsec_per_pix = 0.05
     print 'Arcsec per pixel not specified. Using default arcsec_per_pix of', arcsec_per_pix, '. Use --arc option to specify arcsec_per_pix.'
 
+if args.gain is not None:
+    gain = float(args.gain)
+    print 'Instrumental gain=', gain
+else:
+    gain = 1.5
+    print 'Instrumental gain not specified. Using default gain=', gain, '. Use --gain option to specify gain.'
+
+if args.epp is not None:
+    el_per_phot = float(args.epp)
+    print 'electrons per photon=', el_per_phot
+else:
+    el_per_phot = 1.
+    print 'el_per_phot not specified. Using default epp=', el_per_phot, '. Use --epp option to specify el_per_phot.'
+
+if args.exp is not None:
+    exptime = float(args.exp)
+    print 'Exposure time=', exptime, 'seconds'
+else:
+    exptime = 600 #sec = 10min exposure
+    print 'Exposure time not specified. Using default exptime=', exptime, '. Use --exp option to specify exposure time in seconds.'
+
 if args.z is not None:
     z = float(args.z)
     print 'Redshift=', z
@@ -543,11 +618,21 @@ else:
     z = 0.13
     print 'Redshift not specified. Using default redshift of', z, '. Use --z option to specify redshift.'
 
+if args.rad is not None:
+    rad = float(args.rad)
+    print 'Telescope radius chosen=', rad, 'm'
+else:
+    rad = 1. #metre
+    print 'Telescope radius not specified. Using default rad=', rad, 'm. Use --rad option to specify radius in metres.'
+
+dist = calc_dist(z) #distance to object; in kpc
+flux_ratio = (rad/(2*dist*3.086e19))**2 #converting emitting luminosity to luminosity seen from earth, 3.08e19 factor to convert kpc to m
+
 if args.res is not None:
     res = float(args.res)
     print 'resoltion forced to be res=', res
 else:
-    res = round(arcsec_per_pix*np.pi/(3600*180)*z*c*1e3/H0, 1) #kpc
+    res = round(arcsec_per_pix*np.pi/(3600*180)*dist, 1) #kpc
     print 'Resolution turns out to be res~', res, ' kpc'
 
 if args.map:
@@ -557,6 +642,16 @@ if args.map:
     else:
         line = 'OIII5007'# #whose emission map to be made
         print 'Line not specified. Using default', line, '. Use --line option to specify line.'
+
+if args.cmin is not None:
+    cmin = float(args.cmin)
+else:
+    cmin = None
+
+if args.cmax is not None:
+    cmax = float(args.cmax)
+else:
+    cmax = None
 
 if args.ppv:
     if args.nhr is not None:
@@ -602,20 +697,17 @@ if args.ppv:
         wmax = None #Angstrom; ending wavelength of PPV cube
     print 'Ending wavelength of PPV cube=', wmax, 'A'
     
-    if not args.getcube or (args.getcube and not args.plotspec and not args.plotmap):
-        args.plotspec = True
-
     if args.X is not None:
         X = float(args.X)
     else:
         X = int(galsize/res/2) - 1 #p-p values at which point to extract spectrum from the ppv cube
-    if args.getcube and args.plotspec: print 'X position at which spectrum to be plotted=', X
+    if args.plotspec: print 'X position at which spectrum to be plotted=', X
 
     if args.Y is not None:
         Y = float(args.Y)
     else:
         Y = int(galsize/res/2) - 1 #p-p values at which point to extract spectrum from the ppv cube
-    if args.getcube and args.plotspec: print 'Y position at which spectrum to be plotted=', Y
+    if args.plotspec: print 'Y position at which spectrum to be plotted=', Y
 
     
 if not args.keepprev:
@@ -635,25 +727,61 @@ if args.addbpt or args.bptpix or args.bptrad:
     else:
         plt.xlim(-1.4,-0.2)
         plt.ylim(-1.5,1.5)
-elif (args.map or args.sfr or args.ppv) and args.smooth:
-    if args.parm is not None:
-        parm = [float(ar) for ar in args.parm.split(',')]
-    else:
-        parm = None # set of parameters i.e. telescope properties to be used for smearing cube/map
-        print 'Parameter set for smearing not specified. Using default settings. Use --parm option to specify smearing parameters set.'
+
+if args.parm is not None:
+    parm = [float(ar) for ar in args.parm.split(',')]
+else:
+    parm = None # set of parameters i.e. telescope properties to be used for smearing cube/map
+    if args.smooth: print 'Parameter set for smearing not specified. Using default settings. Use --parm option to specify smearing parameters set.'
+        
+if args.ker is not None:
+    ker = args.ker
+else:
+    ker = 'moff' # convolution kernel to be used for smearing cube/map
+    if args.smooth: print 'Kernel not specified. Will be using default Moffat profile for smoothing'
+
+if args.off is not None:
+    off = float(args.off)
+else:
+    off = 10. #offset used in makenoisy() function
+        
+if args.wfits is not None:
+    wfits = args.wfits
+    print 'Will be saving fits file.'
+else:
+    wfits = None # name of fits file to be written into
         
 #-----------------------jobs fetched--------------------------------------------------------------------
 for i, Om in enumerate(Om_ar):
     s = ascii.read(getfn(outtag,fn,Om), comment='#', guess=False)
-    if args.addbpt: addbpt(s,Om,col_ar[i], saveplot = args.saveplot)
-    elif args.bptrad: bpt_vs_radius(s,Om, saveplot = args.saveplot)
-    elif args.bptpix: bpt_pixelwise(s, Om, res, saveplot = args.saveplot)
-    elif args.map: map = emissionmap(s, Om, res, line, saveplot = args.saveplot, smooth=args.smooth, parm = parm, hide=args.hide, addnoise=args.addnoise)
-    elif args.sfr: SFRmap_real, SFRmapQ0 = SFRmaps(s, Om, res, getmap=args.getmap, saveplot = args.saveplot, smooth=args.smooth, parm = parm, hide=args.hide, addnoise=args.addnoise)
-    elif args.ppv: ppvcube = spec(s, Om, col_ar[i], wmin=wmin, wmax=wmax, getcube=args.getcube, X=X, Y=Y, spec_smear = args.spec_smear, plotspec = args.plotspec, plotintegmap = args.plotmap, savecube=args.savecube, saveplot = args.saveplot, smooth=args.smooth, parm = parm, hide=args.hide, addnoise=args.addnoise)
-    else: print 'Wrong choice. Choose from:\n --addbpt, --bptpix, --bptrad, --map, --sfr, --ppv'
+    if args.addbpt: 
+        addbpt(s,Om,col_ar[i], saveplot = args.saveplot)
+    elif args.bptrad: 
+        bpt_vs_radius(s,Om, saveplot = args.saveplot)
+    elif args.bptpix: 
+        bpt_pixelwise(s, Om, res, saveplot = args.saveplot, smooth=args.smooth, parm = parm, ker = ker)
+    elif args.map: 
+        map = emissionmap(s, Om, res, line, saveplot = args.saveplot, cmin=cmin, cmax=cmax, off = off, smooth=args.smooth, \
+        parm = parm, ker = ker, hide=args.hide, addnoise=args.addnoise, maketheory=args.maketheory)
+    elif args.sfr: 
+        SFRmap_real, SFRmapQ0 = SFRmaps(s, Om, res, getmap=args.getmap, cmin=cmin, cmax=cmax, off = off, \
+        saveplot = args.saveplot, smooth=args.smooth, parm = parm, ker = ker, hide=args.hide, addnoise=args.addnoise, maketheory=args.maketheory)
+    elif args.ppv: 
+        ppvcube = spec(s, Om, res, col_ar[i], wmin=wmin, wmax=wmax, cmin=cmin, cmax=cmax, off = off, \
+        changeunits= args.changeunits, X=X, Y=Y, spec_smear = args.spec_smear, plotspec = args.plotspec, \
+        plotintegmap = args.plotmap, savecube=args.savecube, saveplot = args.saveplot, smooth=args.smooth, parm = parm, \
+        ker = ker, hide=args.hide, addnoise=args.addnoise, maketheory=args.maketheory)
+    else: 
+        print 'Wrong choice. Choose from:\n --addbpt, --bptpix, --bptrad, --map, --sfr, --ppv'
 if args.saveplot:
-    print 'Saved to path', path
+    print 'Saved here:', path
+if wfits is not None:
+    filename = title(fn)[:-2]+'_'+wfits
+    if args.smooth: filename += '_smeared_'+ker+'_parm'+args.parm
+    if args.addnoise: filename += '_noisy'
+    if args.changeunits: filename += '_flambda'
+    if 'map' in locals(): write_fits(path+filename, map, fill_val=np.nan)
+    if 'ppvcube' in locals(): write_fits(path+filename, ppvcube, fill_val=np.nan)
 #-------------------------------------------------------------------------------------------
 print('Done in %s minutes' % ((time.time() - start_time)/60))
 if not args.hide:
