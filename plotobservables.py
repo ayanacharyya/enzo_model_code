@@ -91,7 +91,7 @@ for Omega = '+str(Om)+', resolution = '+str(res)+' kpc'
     cb.ax.set_yticklabels(str(res*float(x.get_text())) for x in cb.ax.get_yticklabels())
     cb.set_label('Galactocentric distance (in kpc)')
     if saveplot:
-        fig.savefig(path+fn+': BPT for each pixel for Omega= '+str(Om)+'.png')
+        fig.savefig(path+t+'.png')
 #-------------------------------------------------------------------------------------------
 def bpt_vs_radius(s, Om, saveplot=False):
     x = (s['x']-1500/2)*0.02 + galsize/2
@@ -297,6 +297,7 @@ def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None
     ppv = np.zeros((g,g,nwbin))
     funcar = readSB(wmin, wmax)
     cbarlab = 'Log surface brightness in erg/s/pc^2' #label of color bar
+    info = ''
     if changeunits: 
         cbarlab = cbarlab[:cbarlab.find(' in ')+4] + 'erg/s/cm^2/A' #label would be ergs/s/pc^2/A if we choose to change units to flambda
     #-------------------------------------------------------------------------------------------
@@ -329,7 +330,7 @@ def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None
         line = 'lambda-integrated wmin='+str(wmin)+', wmax='+str(wmax)+'\n'
         t = title(fn)+line+' map for Omega = '+str(Om)+', res = '+str(res)+' kpc'
         map = np.sum(ppv,axis=2)
-        if smooth and 'info' not in locals(): map, info = smoothmap(map, parm=parm, ker=ker, addnoise = addnoise, maketheory=maketheory) #should not need this after smoothcube is working
+        if smooth and info == '': map, info = smoothmap(map, parm=parm, ker=ker, addnoise = addnoise, maketheory=maketheory) #should not need this after smoothcube is working
         map = plotmap(map, t+info, line, cbarlab, galsize, res, cmin = cmin, cmax =cmax, hide = hide, saveplot=saveplot, maketheory=maketheory)            
         print 'Returning integrated map as variable "ppvcube"'
         return map
@@ -339,9 +340,9 @@ def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None
         ax = plt.subplot(111)
         for i in wlist:
             plt.axvline(i,ymin=0.9,c='black')    
-        if addnoise and 'info' not in locals(): #should not need this after smoothcube is working
+        if addnoise and info == '': #should not need this after smoothcube is working
             factor = (res*1e3)**2 * flux_ratio * exptime * el_per_phot / (planck * nu * gain)
-            ppv = makenoise(ppv, factor=factor)
+            ppv = makenoisy(ppv, factor=factor)
             info = '_noisy'
         #-------------------------------------------------------------------------------------------
         if plotspec:
@@ -354,7 +355,7 @@ def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None
         plt.title(t)
         plt.ylabel(cbarlab)
         plt.xlabel('Wavelength (A)')
-        #plt.ylim(-0.5,5.5)
+        #plt.ylim(29,37)
         plt.xlim(wmin,wmax)
         if not hide:
             plt.show(block=False)
