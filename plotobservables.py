@@ -319,7 +319,7 @@ def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None
             f /= (w*3.086e18**2) #changing units for David Fisher: from ergs/s to ergs/s/A; the extra factor is to make it end up as /cm^2 insted of /pc^2
         ppv[int(x[j]/res)][int(y[j]/res)][:] += np.divide(f,(res*1e3)**2) #ergs/s/pc^2
     #-------------------------Now PPV is ready: do whatever with it------------------------------------------------------------------
-    #if smooth: ppv, info = smoothcube(ppv, parm=parm, addnoise = addnoise, maketheory=maketheory) #spatially smooth the PPV using certain parameter set
+    #if smooth: ppv, info = smoothcube(ppv, parm=parm, addnoise = addnoise, maketheory=maketheory, changeunits=changeunits) #spatially smooth the PPV using certain parameter set
     if savecube:
         for k in range(nwbin):
             ppv[:,:,k] = plotmap(ppv[:,:,k], 'w slice %.2f A' %w[k], str(w[k]), cbarlab, galsize, res, cmin = cmax, cmax =cmax, hide = True, saveplot=False, maketheory=maketheory)
@@ -330,7 +330,7 @@ def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None
         line = 'lambda-integrated wmin='+str(wmin)+', wmax='+str(wmax)+'\n'
         t = title(fn)+line+' map for Omega = '+str(Om)+', res = '+str(res)+' kpc'
         map = np.sum(ppv,axis=2)
-        if smooth and info == '': map, info = smoothmap(map, parm=parm, ker=ker, addnoise = addnoise, maketheory=maketheory) #should not need this after smoothcube is working
+        if smooth and info == '': map, info = smoothmap(map, parm=parm, ker=ker, addnoise = addnoise, maketheory=maketheory, changeunits=changeunits) #should not need this after smoothcube is working
         map = plotmap(map, t+info, line, cbarlab, galsize, res, cmin = cmin, cmax =cmax, hide = hide, saveplot=saveplot, maketheory=maketheory)            
         print 'Returning integrated map as variable "ppvcube"'
         return map
@@ -340,10 +340,7 @@ def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None
         ax = plt.subplot(111)
         for i in wlist:
             plt.axvline(i,ymin=0.9,c='black')    
-        if addnoise and info == '': #should not need this after smoothcube is working
-            factor = (res*1e3)**2 * flux_ratio * exptime * el_per_phot / (planck * nu * gain)
-            ppv = makenoisy(ppv, factor=factor)
-            info = '_noisy'
+        if addnoise and info == '': ppv, info = makeobservable(ppv, addnoise=addnoise, changeunits=changeunits) #should not need this after smoothcube is working
         #-------------------------------------------------------------------------------------------
         if plotspec:
             plt.plot(w, np.log10(ppv[X][Y][:]),lw=1, c=col)
@@ -355,7 +352,8 @@ def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None
         plt.title(t)
         plt.ylabel(cbarlab)
         plt.xlabel('Wavelength (A)')
-        #plt.ylim(29,37)
+        if changeunits: plt.ylim(29-40,37-40)
+        else: plt.ylim(29,37)
         plt.xlim(wmin,wmax)
         if not hide:
             plt.show(block=False)
@@ -393,7 +391,7 @@ def spectral_smear(w, f, new_w, vres):
     new_f = func(new_w)
     return new_f
 #-------------------------------------------------------------------------------------------
-def smoothmap(map, parm=None, ker='moff', maskzero=False, addnoise = False, maketheory=False, info=''):
+def smoothmap(map, parm=None, ker='moff', maskzero=False, addnoise = False, maketheory=False, info='', silent = False, changeunits=False):
     if parm is None:
         sig, pow, size = 1, 4, 10 #sigma and truncation length of 2D gaussian kernal in pixel units
     else:
@@ -402,34 +400,40 @@ def smoothmap(map, parm=None, ker='moff', maskzero=False, addnoise = False, make
         size += 1 #because kernels need odd integer as size
     if ker == 'gauss':
         kernel = con.Gaussian2DKernel(sig, x_size = size, y_size = size)
-        print 'Using Gaussian kernel.'
-        print 'Using parameter set: FWHM=', sig*2*np.sqrt(2*np.log(2)), ', size=', size, ' pixels.'
+        if not silent: print 'Using Gaussian kernel.\nUsing parameter set: FWHM=', sig*2*np.sqrt(2*np.log(2)), ', size=', size, ' pixels.'
     elif ker == 'moff':
         kernel = con.Moffat2DKernel(sig, pow, x_size = size, y_size = size)
-        print 'Using Moffat kernel.'
-        print 'Using parameter set: FWHM=', sig*2*np.sqrt(2**(1./pow)-1.), ', pow=', pow, ', size=', size, ' pixels.'
+        if not silent: print 'Using Moffat kernel.\nUsing parameter set: FWHM=', sig*2*np.sqrt(2**(1./pow)-1.), ', pow=', pow, ', size=', size, ' pixels.'
     else:
-        print 'Kernel not identified. Using moffat. Use --ker <option> to specify kernel, where <option>=gauss OR moff'   
+        if not silent: print 'Kernel not identified. Using moffat. Use --ker <option> to specify kernel, where <option>=gauss OR moff'   
         sys.exit()
     map = con.convolve(map, kernel, boundary = 'fill', fill_value = 0.0, normalize_kernel=True)
     info += '\n_smeared_'+ker+'_parm'+str(parm)
     if maskzero:
         map = np.ma.masked_where(map<=0., map)
-    if not maketheory:
-        factor = (res*1e3)**2 * flux_ratio * exptime * el_per_phot / (planck * nu * gain)
-        map *= factor #to get in counts
-        map = np.ma.masked_where(np.log10(map)<0, map) #clip all that have less than 1 count
-        if addnoise: 
-            map = makenoisy(map, factor=1.)
-            info += '_noisy'
-        map /= factor
-        info += '_obs'
+    if not maketheory: map, info = makeobservable(map, addnoise =addnoise, changeunits = changeunits, info = info)
     return map, info
 #-------------------------------------------------------------------------------------------
-def smoothcube(cube, addnoise = False, maketheory = False, parm=None, info=''):
+def smoothcube(cube, addnoise = False, maketheory = False, parm=None, info='', changeunits=False):
     for k in range(np.shape(cube)[2]):
-        cube [:,:,k], info = smoothmap(cube[:,:,k], addnoise = addnoise, maketheory = maketheory, parm=parm, info=info)
+        cube [:,:,k], info = smoothmap(cube[:,:,k], addnoise = addnoise, maketheory = maketheory, parm=parm, info=info, silent = True, changeunits=changeunits)
+        print 'smoothed slice', k, 'of', np.shape(cube)[2] #
     return cube, info
+#-------------------------------------------------------------------------------------------
+def makeobservable(map, addnoise=False, changeunits=False, info=''):
+    factor = (res*1e3)**2 * flux_ratio * exptime * el_per_phot / (planck * nu * gain)
+    if changeunits: 
+        factor *= 3.086e18**2 * c*1e3 / nu * 1e10 #in case the units are in ergs/s/cm^2/A instead of ergs/s/pc^2
+        info += '_flambda'
+    map *= factor #to get in counts
+    if addnoise: 
+        map = makenoisy(map, factor=1.)
+        info += '_noisy'
+    map = np.ma.masked_where(np.log10(map)<0., map) #clip all that have less than 1 count
+    map = np.ma.masked_where(np.log10(map)>5., map) #clip all that have more than 100,000 count i.e. saturating
+    map /= factor
+    info += '_obs'
+    return map, info
 #-------------------------------------------------------------------------------------------
 def makenoisy(data, factor=None):
     dummy = copy.copy(data)
@@ -439,9 +443,10 @@ def makenoisy(data, factor=None):
     noisydata = np.random.poisson(lam=data, size=None)/factor
     noisydata = noisydata.astype(float)
     noise = noisydata - dummy    
-    print 'makenoisy: data', np.mean(dummy), np.std(dummy), np.min(np.ma.masked_where(dummy<=0, dummy)), np.max(dummy) #
-    print 'makenoisy: noisydata', np.mean(noisydata), np.std(noisydata), np.min(np.ma.masked_where(noisydata<=0, noisydata)), np.max(noisydata) #
-    print 'makenoisy: noise', np.mean(noise), np.std(noise), np.min(np.ma.masked_where(noise<=0, noise)), np.max(noise) #    
+    print 'makenoisy: array mean std min max'
+    print 'makenoisy: data', np.mean(dummy), np.std(dummy), np.min(np.ma.masked_where(dummy<=0, dummy)), np.max(dummy)
+    print 'makenoisy: noisydata', np.mean(noisydata), np.std(noisydata), np.min(np.ma.masked_where(noisydata<=0, noisydata)), np.max(noisydata)
+    print 'makenoisy: noise', np.mean(noise), np.std(noise), np.min(np.ma.masked_where(noise<=0, noise)), np.max(noise) 
     return noisydata
 #-------------------------------------------------------------------------------------------
 def plotmap(map, title, savetitle, cbtitle, galsize, res, cmin = None, cmax = None, islog=True, saveplot=False, hide=False, maketheory=False):    
