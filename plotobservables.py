@@ -65,7 +65,7 @@ def gauss(w, f, w0, f0, v, vz):
     f += g
     return f
 #-------------------------------------------------------------------------------------------
-def bpt_pixelwise(s, Om, res, saveplot=False, smooth=False, ker = None, parm=None):
+def bpt_pixelwise(s, Om, res, saveplot=False, smooth=False, ker = None, parm=None, addnoise=False, maketheory=False):
     g,x,y = calcpos(s, galsize, res)
     b=np.linspace(-g/2,g/2,g)
     d = np.sqrt(b[:,None]**2+b**2)
@@ -200,8 +200,8 @@ def SFRmaps(s, Om, reso, getmap=True, saveplot=False, smooth=False, ker = None, 
         b=np.linspace(-g/2,g/2,g)
         #d = np.sqrt(b[:,None]**2+b**2)
 
-        SFRmapHa = (const/1.37e-12)*make2Dmap(flux, x, y, g, res)/((res*1e3)**2) #Msun/yr/pc^2
-        SFRmapQ0 = const*(1-f_esc)*(1-f_dust)*make2Dmap(lum, x, y, g, res, islog=True)/((res*1e3)**2) #Msun/yr/pc^2
+        SFRmapHa = make2Dmap(flux, x, y, g, res)/((res*1e3)**2) #Just the H-alpha map in ergs/s/pc^2
+        SFRmapQ0 = make2Dmap(lum, x, y, g, res, islog=True)/((res*1e3)**2) #Just the ionizing photon map in phot/s/pc^2
         SFRmap_real = make2Dmap(masses, x, y, g, res)/((res*1e3)**2)
         agemap = 1e6*make2Dmap(ages, x, y, g, res, domean=True)
         #SFRmap_real /= agemap #dividing by mean age in the box
@@ -210,13 +210,17 @@ def SFRmaps(s, Om, reso, getmap=True, saveplot=False, smooth=False, ker = None, 
         #SFRmap_comp = SFRmapQ0/SFRmap_real
         #mean.append(np.log10(np.mean(SFRmap_real)))
         t = title(fn)+'SFR map for Omega = '+str(Om)+', resolution = '+str(res)+' kpc'
+        info = ''
         if smooth:
-            SFRmapQ0, info = smoothmap(SFRmapQ0, parm=parm, ker=ker, maskzero=True, addnoise = addnoise, maketheory = maketheory)
+            SFRmapQ0, info = smoothmap(SFRmapQ0, parm=parm, ker=ker, maskzero=True, addnoise = addnoise, maketheory = maketheory, units_in_photon=True)
             SFRmapHa, info = smoothmap(SFRmapHa, parm=parm, ker=ker, maskzero=True, addnoise = addnoise, maketheory = maketheory)
-            SFRmap_real = np.ma.masked_where(SFRmap_real<=0., SFRmap_real)
             t += info
-        else: SFRmapHa = np.ma.masked_where(SFRmapHa<=0., SFRmapHa) #
-        print 'Statistics from SFRHa map:\n', 'Mean=', np.mean(SFRmapHa), 'Std dev=', np.std(SFRmapHa), 'Min=', np.min(SFRmapHa)
+        else: 
+            SFRmapHa = np.ma.masked_where(SFRmapHa<=0., SFRmapHa)
+            SFRmapQ0 = np.ma.masked_where(SFRmapQ0<=0., SFRmapQ0)
+        SFRmap_real = np.ma.masked_where(SFRmap_real<=0., SFRmap_real)
+        SFRmapHa *= (const/1.37e-12) #Msun/yr/pc^2
+        SFRmapQ0 *= const*(1-f_esc)*(1-f_dust) #Msun/yr/pc^2
         if getmap:
             SFRmapQ0 = plotmap(SFRmapQ0, t, 'SFRmapQ0', 'Log SFR(Q0) density in Msun/yr/pc^2', galsize, res, cmin = cmin, cmax =cmax, saveplot = saveplot, hide = hide)
             SFRmap_real = plotmap(SFRmap_real, t, 'SFRmap_real', 'Log SFR(real) density in Msun/yr/pc^2', galsize, res, cmin = cmin, cmax =cmax, saveplot = saveplot, hide = hide)
@@ -236,8 +240,7 @@ def SFRmaps(s, Om, reso, getmap=True, saveplot=False, smooth=False, ker = None, 
             ax.set_ylim(ax.get_ylim())
             ax.plot(lims, lims, 'k-', alpha=0.75, zorder=0, label = 'x=y line')
             #-------------------------------#
-            t= 'SFR comparison for '+fn+', res '+str(res)+' kpc'
-            if smooth: t += '\n_smeared_'+ker+'_parm'+args.parm
+            t= 'SFR comparison for '+fn+', res '+str(res)+' kpc'+info
             plt.ylabel('Log (Predicted SFR density) in Msun/yr/pc^2')
             plt.xlabel('Log (Actual SFR density) in Msun/yr/pc^2')
             plt.title(t)
@@ -288,13 +291,13 @@ def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None
         new_w = [np.min(w)]
         while new_w[-1] < np.max(w):
             new_w.append(new_w[-1]*(1+vres/c))
-        new_w = new_w[:-1]
         nwbin = len(new_w) #final no. of bins in wavelength dimension
+        bin_index = np.digitize(w, new_w)
     else:
-        nwbin = len(w)
+        nwbin = len(w) + 1
     #-------------------------------------------------------------------------------------------
     g,x,y = calcpos(s, galsize, res)
-    ppv = np.zeros((g,g,nwbin))
+    ppv = np.zeros((g,g,nwbin - 1))
     funcar = readSB(wmin, wmax)
     cbarlab = 'Log surface brightness in erg/s/pc^2' #label of color bar
     info = ''
@@ -302,6 +305,7 @@ def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None
         cbarlab = cbarlab[:cbarlab.find(' in ')+4] + 'erg/s/cm^2/A' #label would be ergs/s/pc^2/A if we choose to change units to flambda
     #-------------------------------------------------------------------------------------------
     for j in range(len(s)):
+        print 'Particle', j, 'of', len(s) #
         vz = float(s['vz'][j])
         a = int(round(s['age(MYr)'][j]))
         f = np.multiply(funcar[a](w),(300./1e6)) ### to scale the continuum by 300Msun, as the ones produced by SB99 was for 1M Msun
@@ -311,26 +315,29 @@ def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None
         flist = np.multiply(np.array(flist), const)
         for i, fli in enumerate(flist):
             f = gauss(w, f, wlist[i], fli, vdisp, vz) #adding every line flux on top of continuum
-        if spec_smear: 
-            print 'interpolating for', j, 'of', len(s) #
-            f = spectral_smear(w, f, new_w, vres) #to account for spectral resolution limit
-            w = new_w
         if changeunits:
             f /= (w*3.086e18**2) #changing units for David Fisher: from ergs/s to ergs/s/A; the extra factor is to make it end up as /cm^2 insted of /pc^2
+        if spec_smear: 
+            f = [f[bin_index == ii].sum() for ii in range(1, len(new_w))]
         ppv[int(x[j]/res)][int(y[j]/res)][:] += np.divide(f,(res*1e3)**2) #ergs/s/pc^2
     #-------------------------Now PPV is ready: do whatever with it------------------------------------------------------------------
-    #if smooth: ppv, info = smoothcube(ppv, parm=parm, addnoise = addnoise, maketheory=maketheory, changeunits=changeunits) #spatially smooth the PPV using certain parameter set
+    if spec_smear: 
+        w = new_w[1:]
+        if '_specsmeared' not in info: info += '_specsmeared'    
+        if smooth and not plotintegmap: ppv, info = smoothcube(ppv, parm=parm, addnoise = addnoise, maketheory=maketheory, changeunits=changeunits, info=info) #spatially smooth the PPV using certain parameter set
     if savecube:
-        for k in range(nwbin):
+        for k in range(np.shape(ppv)[2]):
             ppv[:,:,k] = plotmap(ppv[:,:,k], 'w slice %.2f A' %w[k], str(w[k]), cbarlab, galsize, res, cmin = cmax, cmax =cmax, hide = True, saveplot=False, maketheory=maketheory)
+            fig = plt.gcf() #get handle of current figure
             fig.savefig(path+fn+'_cube/map_for_Om='+str(Om_ar[0])+'_slice'+str(k)+info+'.png')
             plt.close()       
+        print 'Returning PPV as variable "ppvcube"'
     #-------------------------------------------------------------------------------------------
     if plotintegmap:
         line = 'lambda-integrated wmin='+str(wmin)+', wmax='+str(wmax)+'\n'
         t = title(fn)+line+' map for Omega = '+str(Om)+', res = '+str(res)+' kpc'
         map = np.sum(ppv,axis=2)
-        if smooth and info == '': map, info = smoothmap(map, parm=parm, ker=ker, addnoise = addnoise, maketheory=maketheory, changeunits=changeunits) #should not need this after smoothcube is working
+        if smooth: map, info = smoothmap(map, parm=parm, ker=ker, addnoise = addnoise, maketheory=maketheory, changeunits=changeunits, info=info) #should not need this after smoothcube is working
         map = plotmap(map, t+info, line, cbarlab, galsize, res, cmin = cmin, cmax =cmax, hide = hide, saveplot=saveplot, maketheory=maketheory)            
         print 'Returning integrated map as variable "ppvcube"'
         return map
@@ -340,7 +347,6 @@ def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None
         ax = plt.subplot(111)
         for i in wlist:
             plt.axvline(i,ymin=0.9,c='black')    
-        if addnoise and info == '': ppv, info = makeobservable(ppv, addnoise=addnoise, changeunits=changeunits) #should not need this after smoothcube is working
         #-------------------------------------------------------------------------------------------
         if plotspec:
             plt.plot(w, np.log10(ppv[X][Y][:]),lw=1, c=col)
@@ -385,13 +391,8 @@ def make2Dmap(data, xi, yi, gridsize, res, domean=False, islog=False):
         map = np.divide(map,count)
         map[np.isnan(map)] = 0
     return map 
-#-------------------------------------------------------------------------------------------------
-def spectral_smear(w, f, new_w, vres):
-    func = interp1d(w, f, kind='cubic')
-    new_f = func(new_w)
-    return new_f
 #-------------------------------------------------------------------------------------------
-def smoothmap(map, parm=None, ker='moff', maskzero=False, addnoise = False, maketheory=False, info='', silent = False, changeunits=False):
+def smoothmap(map, parm=None, ker='moff', maskzero=False, addnoise = False, maketheory=False, info='', silent = False, changeunits=False, units_in_photon=False):
     if parm is None:
         sig, pow, size = 1, 4, 10 #sigma and truncation length of 2D gaussian kernal in pixel units
     else:
@@ -408,10 +409,10 @@ def smoothmap(map, parm=None, ker='moff', maskzero=False, addnoise = False, make
         if not silent: print 'Kernel not identified. Using moffat. Use --ker <option> to specify kernel, where <option>=gauss OR moff'   
         sys.exit()
     map = con.convolve(map, kernel, boundary = 'fill', fill_value = 0.0, normalize_kernel=True)
-    info += '\n_smeared_'+ker+'_parm'+str(parm)
+    if '_smeared_' not in info: info += '\n_smeared_'+ker+'_parm'+str(parm)
     if maskzero:
         map = np.ma.masked_where(map<=0., map)
-    if not maketheory: map, info = makeobservable(map, addnoise =addnoise, changeunits = changeunits, info = info)
+    if not maketheory: map, info = makeobservable(map, addnoise =addnoise, changeunits = changeunits, info = info, silent=silent, units_in_photon=units_in_photon)
     return map, info
 #-------------------------------------------------------------------------------------------
 def smoothcube(cube, addnoise = False, maketheory = False, parm=None, info='', changeunits=False):
@@ -420,33 +421,35 @@ def smoothcube(cube, addnoise = False, maketheory = False, parm=None, info='', c
         print 'smoothed slice', k, 'of', np.shape(cube)[2] #
     return cube, info
 #-------------------------------------------------------------------------------------------
-def makeobservable(map, addnoise=False, changeunits=False, info=''):
-    factor = (res*1e3)**2 * flux_ratio * exptime * el_per_phot / (planck * nu * gain)
+def makeobservable(map, addnoise=False, changeunits=False, info='',silent=False, units_in_photon=False):
+    factor = (res*1e3)**2 * flux_ratio * exptime * el_per_phot / gain
+    if not units_in_photon: factor /= (planck * nu) #to bring it to units of photons, or rather, ADUs
     if changeunits: 
         factor *= 3.086e18**2 * c*1e3 / nu * 1e10 #in case the units are in ergs/s/cm^2/A instead of ergs/s/pc^2
-        info += '_flambda'
+        if '_flambda' not in info: info += '_flambda'
     map *= factor #to get in counts
     if addnoise: 
-        map = makenoisy(map, factor=1.)
-        info += '_noisy'
+        map = makenoisy(map, factor=1., silent=silent)
+        if '_noisy' not in info: info += '_noisy'
     map = np.ma.masked_where(np.log10(map)<0., map) #clip all that have less than 1 count
     map = np.ma.masked_where(np.log10(map)>5., map) #clip all that have more than 100,000 count i.e. saturating
     map /= factor
-    info += '_obs'
+    if '_obs' not in info: info += '_obs'
     return map, info
 #-------------------------------------------------------------------------------------------
-def makenoisy(data, factor=None):
+def makenoisy(data, factor=None, silent=False):
     dummy = copy.copy(data)
     if factor is None:
         factor = (res*1e3)**2 * flux_ratio * exptime * el_per_phot / (planck * nu)
     data *= factor
     noisydata = np.random.poisson(lam=data, size=None)/factor
     noisydata = noisydata.astype(float)
-    noise = noisydata - dummy    
-    print 'makenoisy: array mean std min max'
-    print 'makenoisy: data', np.mean(dummy), np.std(dummy), np.min(np.ma.masked_where(dummy<=0, dummy)), np.max(dummy)
-    print 'makenoisy: noisydata', np.mean(noisydata), np.std(noisydata), np.min(np.ma.masked_where(noisydata<=0, noisydata)), np.max(noisydata)
-    print 'makenoisy: noise', np.mean(noise), np.std(noise), np.min(np.ma.masked_where(noise<=0, noise)), np.max(noise) 
+    if not silent:
+        noise = noisydata - dummy    
+        print 'makenoisy: array mean std min max'
+        print 'makenoisy: data', np.mean(dummy), np.std(dummy), np.min(np.ma.masked_where(dummy<=0, dummy)), np.max(dummy)
+        print 'makenoisy: noisydata', np.mean(noisydata), np.std(noisydata), np.min(np.ma.masked_where(noisydata<=0, noisydata)), np.max(noisydata)
+        print 'makenoisy: noise', np.mean(noise), np.std(noise), np.min(np.ma.masked_where(noise<=0, noise)), np.max(noise) 
     return noisydata
 #-------------------------------------------------------------------------------------------
 def plotmap(map, title, savetitle, cbtitle, galsize, res, cmin = None, cmax = None, islog=True, saveplot=False, hide=False, maketheory=False):    
@@ -693,15 +696,17 @@ if args.ppv:
 
     if args.wmin is not None:
         wmin = float(args.wmin)
+        print 'Starting wavelength of PPV cube=', wmin, 'A'
     else:
         wmin = None #Angstrom; starting wavelength of PPV cube
-    print 'Starting wavelength of PPV cube=', wmin, 'A'
+        print 'Starting wavelength of PPV cube at beginning of line list'
     
     if args.wmax is not None:
         wmax = float(args.wmax)
+        print 'Ending wavelength of PPV cube=', wmax, 'A'
     else:
         wmax = None #Angstrom; ending wavelength of PPV cube
-    print 'Ending wavelength of PPV cube=', wmax, 'A'
+        print 'Ending wavelength of PPV cube at end of line list'
     
     if args.X is not None:
         X = float(args.X)
@@ -765,7 +770,7 @@ for i, Om in enumerate(Om_ar):
     elif args.bptrad: 
         bpt_vs_radius(s,Om, saveplot = args.saveplot)
     elif args.bptpix: 
-        bpt_pixelwise(s, Om, res, saveplot = args.saveplot, smooth=args.smooth, parm = parm, ker = ker)
+        bpt_pixelwise(s, Om, res, saveplot = args.saveplot, smooth=args.smooth, parm = parm, ker = ker, addnoise=args.addnoise, maketheory=args.maketheory)
     elif args.map: 
         map = emissionmap(s, Om, res, line, saveplot = args.saveplot, cmin=cmin, cmax=cmax, off = off, smooth=args.smooth, \
         parm = parm, ker = ker, hide=args.hide, addnoise=args.addnoise, maketheory=args.maketheory)
