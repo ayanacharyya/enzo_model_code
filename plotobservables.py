@@ -273,6 +273,7 @@ def readSB(wmin, wmax):
     return funcar
 #-------------------------------------------------------------------------------------------
 def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None, getcube=False, X=None, Y=None, spec_smear=False, plotspec=False, plotintegmap=False, addnoise = False, savecube=False, saveplot=False, smooth=False, ker = None, parm=None, hide=False, cmin=None, cmax=None, maketheory=False):
+    global fitsname
     wlist, llist = readlist()
     if wmin is None: wmin = wlist[0]-50.
     if wmax is None: wmax = wlist[-1]+50.
@@ -324,14 +325,14 @@ def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None
     if spec_smear: 
         w = new_w[1:]
         if '_specsmeared' not in info: info += '_specsmeared'    
-        if smooth and not plotintegmap: ppv, info = smoothcube(ppv, parm=parm, addnoise = addnoise, maketheory=maketheory, changeunits=changeunits, info=info) #spatially smooth the PPV using certain parameter set
+    if smooth and not plotintegmap: ppv, info = smoothcube(ppv, parm=parm, addnoise = addnoise, maketheory=maketheory, changeunits=changeunits, info=info) #spatially smooth the PPV using certain parameter set
     if savecube:
         for k in range(np.shape(ppv)[2]):
             ppv[:,:,k] = plotmap(ppv[:,:,k], 'w slice %.2f A' %w[k], str(w[k]), cbarlab, galsize, res, cmin = cmax, cmax =cmax, hide = True, saveplot=False, maketheory=maketheory)
             fig = plt.gcf() #get handle of current figure
             fig.savefig(path+fn+'_cube/map_for_Om='+str(Om_ar[0])+'_slice'+str(k)+info+'.png')
+            print 'Saved slice', k, 'of', np.shape(ppv)[2]
             plt.close()       
-        print 'Returning PPV as variable "ppvcube"'
     #-------------------------------------------------------------------------------------------
     if plotintegmap:
         line = 'lambda-integrated wmin='+str(wmin)+', wmax='+str(wmax)+'\n'
@@ -366,6 +367,7 @@ def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None
         if saveplot:
             fig.savefig(path+t+'.png')
         print 'Returning PPV as variable "ppvcube"'
+        fitsname = 'PPV for '+fn+' Nebular+ stellar for Om = '+str(Om)+', res = '+str(res)+' kpc' + info
         return ppv                
 #-------------------------------------------------------------------------------------------
 def calcpos(s, galsize, res):
@@ -482,7 +484,7 @@ def getfn(outtag,fn,Om):
     return '/Users/acharyya/models/emissionlist'+outtag+'/emissionlist_'+fn+'_Om'+str(Om)+'.txt'
 #-------------------------------------------------------------------------------------------
 def write_fits(filename, data, fill_val=np.nan):
-    hdu = fits.PrimaryHDU(data.filled(fill_val))
+    hdu = fits.PrimaryHDU(np.ma.filled(data,fill_value=fill_val))
     hdulist = fits.HDUList([hdu])
     if filename[-5:] != '.fits':
         filename += '.fits'
@@ -494,6 +496,7 @@ def calc_dist(z, H0 = 70.):
     return dist
 #-------------------End of functions------------------------------------------------------------------------
 #-------------------Begin main code------------------------------------------------------------------------
+global fitsname
 col_ar=['m','blue','steelblue','aqua','lime','darkolivegreen','goldenrod','orangered','darkred','dimgray']
 path = '/Users/acharyya/Desktop/bpt/'
 outtag = '_logT4'
@@ -760,7 +763,7 @@ if args.wfits is not None:
     wfits = args.wfits
     print 'Will be saving fits file.'
 else:
-    wfits = None # name of fits file to be written into
+    wfits = '' # name of fits file to be written into
         
 #-----------------------jobs fetched--------------------------------------------------------------------
 for i, Om in enumerate(Om_ar):
@@ -774,6 +777,7 @@ for i, Om in enumerate(Om_ar):
     elif args.map: 
         map = emissionmap(s, Om, res, line, saveplot = args.saveplot, cmin=cmin, cmax=cmax, off = off, smooth=args.smooth, \
         parm = parm, ker = ker, hide=args.hide, addnoise=args.addnoise, maketheory=args.maketheory)
+        #write_fits(path+filename, map, fill_val=np.nan)
     elif args.sfr: 
         SFRmap_real, SFRmapQ0 = SFRmaps(s, Om, res, getmap=args.getmap, cmin=cmin, cmax=cmax, off = off, \
         saveplot = args.saveplot, smooth=args.smooth, parm = parm, ker = ker, hide=args.hide, addnoise=args.addnoise, maketheory=args.maketheory)
@@ -782,17 +786,15 @@ for i, Om in enumerate(Om_ar):
         changeunits= args.changeunits, X=X, Y=Y, spec_smear = args.spec_smear, plotspec = args.plotspec, \
         plotintegmap = args.plotmap, savecube=args.savecube, saveplot = args.saveplot, smooth=args.smooth, parm = parm, \
         ker = ker, hide=args.hide, addnoise=args.addnoise, maketheory=args.maketheory)
+        '''
+        if not plotmap:
+            fitsname = wfits + fitsname
+            write_fits(path+fitsname, ppvcube, fill_val=np.nan)
+        '''
     else: 
         print 'Wrong choice. Choose from:\n --addbpt, --bptpix, --bptrad, --map, --sfr, --ppv'
 if args.saveplot:
     print 'Saved here:', path
-if wfits is not None:
-    filename = title(fn)[:-2]+'_'+wfits
-    if args.smooth: filename += '_smeared_'+ker+'_parm'+args.parm
-    if args.addnoise: filename += '_noisy'
-    if args.changeunits: filename += '_flambda'
-    if 'map' in locals(): write_fits(path+filename, map, fill_val=np.nan)
-    if 'ppvcube' in locals(): write_fits(path+filename, ppvcube, fill_val=np.nan)
 #-------------------------------------------------------------------------------------------
 print('Done in %s minutes' % ((time.time() - start_time)/60))
 if not args.hide:
