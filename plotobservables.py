@@ -367,7 +367,8 @@ def spec(s, Om, res, col, wmin = None, wmax = None, changeunits= False, off=None
         if saveplot:
             fig.savefig(path+t+'.png')
         print 'Returning PPV as variable "ppvcube"'
-        fitsname = 'PPV for '+fn+' Nebular+ stellar for Om = '+str(Om)+', res = '+str(res)+' kpc' + info
+        fitsname = 'PPV for '+fn+' Nebular+ stellar for Om = '+str(Om)+', res = '+str(res)+' kpc_'\
+        +str(wmin)+'-'+str(wmax)+'A' + info
         return ppv                
 #-------------------------------------------------------------------------------------------
 def calcpos(s, galsize, res):
@@ -786,11 +787,11 @@ for i, Om in enumerate(Om_ar):
         changeunits= args.changeunits, X=X, Y=Y, spec_smear = args.spec_smear, plotspec = args.plotspec, \
         plotintegmap = args.plotmap, savecube=args.savecube, saveplot = args.saveplot, smooth=args.smooth, parm = parm, \
         ker = ker, hide=args.hide, addnoise=args.addnoise, maketheory=args.maketheory)
-        '''
-        if not plotmap:
+        
+        if not args.plotmap:
             fitsname = wfits + fitsname
             write_fits(path+fitsname, ppvcube, fill_val=np.nan)
-        '''
+        
     else: 
         print 'Wrong choice. Choose from:\n --addbpt, --bptpix, --bptrad, --map, --sfr, --ppv'
 if args.saveplot:
