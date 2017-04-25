@@ -253,15 +253,15 @@ def metallicity(mapcube, wlist, llist, errorcube=None, SNR_thresh=None, getmap=F
 #slope, intercept : fitted parameters\n\
 #scatter : RMS deviation = sqrt((sum of squared deviation from fit)/ number of data points)\n\
 #by Ayan\n\
-simulation  res_arcsec  vres        power   size    logOHcen        logOHgrad       SNR_thresh      slope       slope_u     intercept       intercept_u\n'
+simulation  res_arcsec  vres        power   size    logOHcen        logOHgrad       SNR_thresh      slope       slope_u     intercept       intercept_u       scale_exptime       realisation\n'
                         open(gradfile,'w').write(head)
                     with open(gradfile,'a') as fout:
                         if args.parm is not None: output = '\n'+fn+'\t\t'+str(res_arcsec)+'\t\t'+str(vres)+'\t\t'+str(parm[0])+'\t\t'+str(parm[1])+'\t\t'+\
                         str(logOHcen)+'\t\t'+'\t\t'+str(logOHgrad)+'\t\t'+'\t\t'+str(SNR_thresh)+'\t\t'+'\t\t'+str('%0.4F'%linefit[0])+'\t\t'+str('%0.4F'%np.sqrt(linecov[0][0]))+'\t\t'+\
-                        str('%0.4F'%linefit[1])+'\t\t'+'\t\t'+str('%0.4F'%np.sqrt(linecov[1][1]))
+                        str('%0.4F'%linefit[1])+'\t\t'+'\t\t'+str('%0.4F'%np.sqrt(linecov[1][1]))+'\t\t'+'\t\t'+str(float(args.scale_extime))+'\t\t'+'\t\t'+str(args.multi_realisation)
                         else: output = '\n'+fn+'\t\t'+str(res_arcsec)+'\t\t'+str(vres)+'\t\t'+str(4.7)+'\t\t'+str(10)+'\t\t'+\
                         str(logOHcen)+'\t\t'+'\t\t'+str(logOHgrad)+'\t\t'+'\t\t'+str(SNR_thresh)+'\t\t'+'\t\t'+str('%0.4F'%linefit[0])+'\t\t'+str('%0.4F'%np.sqrt(linecov[0][0]))+'\t\t'+\
-                        str('%0.4F'%linefit[1])+'\t\t'+'\t\t'+str('%0.4F'%np.sqrt(linecov[1][1]))
+                        str('%0.4F'%linefit[1])+'\t\t'+'\t\t'+str('%0.4F'%np.sqrt(linecov[1][1]))+'\t\t'+'\t\t'+str(float(args.scale_extime))+'\t\t'+'\t\t'+str(args.multi_realisation)
                         fout.write(output)
                 x_arr = np.arange(0,10,0.1)
                 plt.plot(x_arr, np.poly1d(linefit)(x_arr), c='b',label='Inferred gradient')
@@ -335,26 +335,26 @@ def fit_all_lines(wlist, llist, wave, flam, resoln, pix_i, pix_j, nres=5, z=0, z
                 #|.. .. .. .. .. .. .. .....|
                 #
                 #where, 00 = var_00, 01 = var_01 and so on.. (var = sigma^2)
-                #let varaa = vaa (00), var_bb = vbb(11), var_ab = vab(01) = var_ba = vba(10) and so on..
+                #let var_aa = vaa (00), var_bb = vbb(11), var_ab = vab(01) = var_ba = vba(10) and so on..
                 #for a single gaussian, f = const * (b-a)*d
                 #i.e. sigma_f^2 = d^2*(saa^2 + sbb^2) + (b-a)^2*sdd^2 (dropping the constant for clarity of explanation)
                 #i.e. var_f = d^2*(vaa + vbb) + (b-a)^2*vdd
                 #the above holds if we assume covariance matrix to be diagonal (off diagonal terms=0) but thats not the case here
                 #so we also need to include off diagnoal covariance terms while propagating flux errors
-                #so now, for each line, var_f = d^2*(vaa + vbb) + (b-a)^2*vdd - 2vbd - 2vad
+                #so now, for each line, var_f = d^2*(vaa + vbb) + (b-a)^2*vdd + 2d^2*vab + 2d*(b-a)*(vbd - vad)
                 #i.e. in terms of element indices,
-                #var_f = 3^2(00 + 11) + (1-0)^2*33 - 2*13 - 2*03,
-                #var_f = 6^2(00 + 44) + (4-0)^2*66 - 2*46 - 2*06,
-                #var_f = 9^2(00 + 77) + (1-0)^2*99 - 2*79 - 2*09, etc.
+                #var_f = 3^2(00 + 11) + (1-0)^2*33 - (2)*3^2*10 + (2)*3*(1-0)*(13-03),
+                #var_f = 6^2(00 + 44) + (4-0)^2*66 - (2)*6^2*40 + (2)*6*(4-0)*(46-06),
+                #var_f = 9^2(00 + 77) + (1-0)^2*99 - (2)*9^2*70 + (2)*9*(7-0)*(79-09), etc.
                 #
                 popt_single= np.concatenate(([popt[0]],popt[3*xx+1:3*(xx+1)+1]))               
                 flux = np.sqrt(2*np.pi)*(popt_single[1] - popt_single[0])*popt_single[3] #total flux = integral of guassian fit ; resulting flux in ergs/s/pc^2 units
                 flux_array.append(flux)
                 flux_error = np.sqrt(2*np.pi*(popt_single[3]**2*(pcov[0][0] + pcov[3*xx+1][3*xx+1])\
                 + (popt_single[1]-popt_single[0])**2*pcov[3*(xx+1)][3*(xx+1)]\
-                - 2*pcov[3*xx+1][3*(xx+1)]\
-                - 2*pcov[0][3*(xx+1)]\
-                )) # var_f = 3^2(00 + 11) + (1-0)^2*33 - 2*13 - 2*03
+                - 2*popt_single[3]**2*pcov[3*xx+1][0]\
+                + 2*(popt_single[1] - popt_single[0])*popt_single[3]*(pcov[3*xx+1][3*(xx+1)] - pcov[0][3*(xx+1)])\
+                )) # var_f = 3^2(00 + 11) + (1-0)^2*33 - (2)*3^2*10 + (2)*3*(1-0)*(13-03)
                 #print 'deb358', flux_error**2, 2*pcov[3*xx+1][3*(xx+1)], 2*pcov[0][3*(xx+1)] #
                 flux_error_array.append(flux_error)
                 if showplot:
@@ -635,7 +635,8 @@ def spec(s, Om, res, res_phys, wmin=None, wmax=None, changeunits= False, off=Non
         fig.savefig(path+t+'.png')
     print 'Returning PPV as variable "ppvcube"'
     
-    if scale_exptime: info += '_exp'+str(exptime)+'s'
+    if args.scale_exptime: info += '_exp'+str(exptime)+'s'
+    if args.multi_realisation: info += '_real'+str(args.multi_realisation)
     fitsname = 'PPV_'+fn+'Om='+str(Om)+',arc='+str(res_arcsec)+'_'+str(wmin)+'-'+str(wmax)+'A' + info+ gradtext +'.fits'
     return ppv                
 #-------------------------------------------------------------------------------------------
@@ -947,6 +948,7 @@ def getfitsname(parm, ker, res, res_phys, Om, wmin, wmax, args):
     if args.fixed_SNR is not None: info += '_fixedSNR'+str(fixed_SNR)
     if not args.maketheory: info+= '_obs'
     if args.scale_exptime: info += '_exp'+str(exptime)+'s'
+    if args.multi_realisation: info += '_real'+str(args.multi_realisation)
     fitsname = 'PPV_'+fn+'Om='+str(Om)+',arc='+str(res_arcsec)+'_'+str(wmin)+'-'+str(wmax)+'A' + info+ gradtext +'.fits'
     return fitsname
 #-------------------------------------------------------------------------------------------
@@ -1045,9 +1047,9 @@ if __name__ == '__main__':
     parser.set_defaults(calcgradient=False)
     parser.add_argument('--nowrite', dest='nowrite', action='store_true')
     parser.set_defaults(nowrite=False)
-    parser.add_argument('--scale_exptime', dest='scale_exptime', action='store_true')
-    parser.set_defaults(scale_exptime=False)
 
+    parser.add_argument('--scale_exptime')
+    parser.add_argument('--multi_realisation')
     parser.add_argument("--file")
     parser.add_argument("--om")
     parser.add_argument("--line")
@@ -1171,7 +1173,7 @@ if __name__ == '__main__':
         print 'Exposure time=', exptime, 'seconds'
     else:
         if args.scale_exptime:
-            exptime = 600*(0.5/res_arcsec)**2 #increasing exposure time quadratically with finer resolution, with fiducial values of 600s for 0.5"
+            exptime = float(args.scale_exptime)*(0.5/res_arcsec)**2 #increasing exposure time quadratically with finer resolution, with fiducial values of 600s for 0.5"
         else:
             exptime = 600 #sec = 10min exposure
         print 'Exposure time not specified. Using default exptime=', exptime, '. Use --exp option to specify exposure time in seconds.'
