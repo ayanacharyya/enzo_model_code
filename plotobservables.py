@@ -8,8 +8,12 @@ import os
 HOME = os.getenv('HOME')
 import sys
 sys.path.append(HOME+'/Work/astro/mageproject/ayan/')
+sys.path.append(HOME+'/models/enzo_model_code/')
 import splot_util as su
-from scipy.optimize import curve_fit
+import parallel_convolve as pc
+import parallel_fitting as pf
+from scipy.optimize import curve_fit, fminbound
+from scipy.integrate import quad
 from operator import itemgetter
 from scipy.interpolate import interp1d
 import warnings
@@ -148,7 +152,81 @@ def gridoverlay(annotate=False, saveplot=False):
     meshplot3D(x,y, annotate=annotate)
     if saveplot:
         fig.savefig(path+fn+':BPT overlay')
-#-------------------------------------------------------------------------------------------
+#----------Function to measure scale length of disk---------------------------------------------------------------------------------
+def knee(r, r_s, alpha):
+    return r**(1./alpha) - np.exp(r/r_s)
+
+def powerlaw(x, alpha):
+    return x**(1/alpha)
+
+def exponential(x, r_s):
+    return np.exp(-x/r_s)
+
+def func(r, r_s, alpha):
+    from scipy.integrate import quad
+    quad = np.vectorize(quad)
+    r_knee = fminbound(knee,0,3,args=(r_s,alpha)) #0.
+    if args.toscreen: print 'deb166:r_s, alpha, r_knee=', r_s, alpha, r_knee, time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+    y = np.zeros(len(r))
+    y += quad(powerlaw, 0., r, args=(alpha,))[0] * (r <= r_knee)
+    y += (quad(powerlaw, 0., r_knee, args=(alpha,))[0] + quad(exponential, r_knee, r, args=(r_s,))[0]) * (r > r_knee)
+    y /= (quad(powerlaw, 0., r_knee, args=(alpha,))[0] + quad(exponential, r_knee, np.inf, args=(r_s,))[0])
+    return y
+
+def get_scale_length(s, args=None, outputfile='junk.txt'):
+    start = time.time()
+    g,x,y = calcpos(s, galsize, res)
+    
+    d_list = np.sqrt((x-galsize/2)**2 + (y-galsize/2)**2) #kpc
+    ha_list = [x for (y,x) in sorted(zip(d_list,s['H6562']), key=lambda pair: pair[0])]
+    d_list = np.sort(d_list)
+    ha_cum = np.cumsum(ha_list)/np.sum(ha_list)
+    popt, pcov = curve_fit(func, d_list, ha_cum, p0 = [4,4], bounds = ([1,0.01], [7,8]))
+    scale_length, alpha = popt
+    if not args.hide:
+        fig = plt.figure()
+        plt.scatter(d_list, ha_cum, s=10, lw=0, c='b', label='pixels')
+        plt.plot(d_list, func(d_list,*popt), c='r',label='Fit with scale length=%.2F kpc, pow=%.2F'%(scale_length, alpha))
+        ylab = 'Cumulative Halpha luminosity'
+    '''
+    ha_map = make2Dmap(s['H6562']/res**2, x, y, g, res)
+    ha_map = np.ma.masked_where(ha_map<=0., ha_map)
+    b = np.linspace(-g/2 + 1,g/2,g)*(galsize)/g #in kpc
+    d = np.sqrt(b[:,None]**2+b**2)
+    ha_list = np.log(ha_map.flatten())
+    d_list = d.flatten()
+    x_arr = np.arange(0,galsize/2,0.1)
+    digitized = np.digitize(d_list, x_arr)    
+    ha_list = [ha_list[digitized == i].mean() for i in range(1, len(x_arr))]
+    d_list = [d_list[digitized == i].mean() for i in range(1, len(x_arr))]
+    ha_list = np.ma.masked_where(np.isnan(ha_list), ha_list)
+    d_list = np.ma.masked_array(d_list, ha_list.mask)
+    ha_list = np.ma.compressed(ha_list)
+    d_list = np.ma.compressed(d_list)            
+    linefit = np.polyfit(d_list, ha_list, 1)
+    scale_length = -1./linefit[0] #kpc
+    if not args.hide:
+        fig = plt.figure()
+        plt.scatter(d_list,ha_list, s=10, lw=0, c='b', label='pixels')
+        plt.plot(x_arr, np.poly1d(linefit)(x_arr), c='r',label='Inferred Ha gradient')
+        plt.axhline(-1+linefit[1], linestyle='--', c='k')
+        plt.axvline(scale_length, linestyle='--', c='k', label='scale_length=%.2F kpc'%scale_length)
+        ylab = 'log Halpha surface brightness'
+    '''
+    if not args.hide:
+        plt.xlabel('Galactocentric distance (kpc)')
+        plt.ylabel(ylab)
+        plt.xlim(0,galsize/2)
+        plt.legend(bbox_to_anchor=(0.9, 0.42), bbox_transform=plt.gcf().transFigure)
+        plt.title('Measuring star formation scale length')
+        plt.show(block=False)
+    
+    ofile = open(outputfile,'a')
+    output = 'Scale length from Halpha map = '+str(scale_length)+' kpc, in %.2F min\n'%((time.time()-start)/60.)
+    ofile.write(output)
+    if args.toscreen: print output #
+    return scale_length
+#------------Function to measure metallicity-------------------------------------------------------------------------------
 def metallicity(mapcube, wlist, llist, final_pix_per_beam, errorcube=None, SNR_thresh=None, getmap=False, hide=False, cmin=None, cmax=None, saveplot=False,calcgradient=False,nowrite=False,scale_exptime=False,fixed_SNR=None,args=None, outputfile='junk.txt'):
     global info, gradtext
     ofile = open(outputfile,'a')
@@ -184,33 +262,34 @@ def metallicity(mapcube, wlist, llist, final_pix_per_beam, errorcube=None, SNR_t
             mapha = np.ma.masked_where(mapha/mapha_u <SNR_thresh, mapha)
             #mapo2 = np.ma.masked_where(mapo2/mapo2_u <SNR_thresh, mapo2)
         
-
     g = np.shape(mapcube)[0]
     b = np.linspace(-g/2 + 1,g/2,g)*(galsize)/g #in kpc
     d = np.sqrt(b[:,None]**2+b**2)
     t = fn+':Met_Om'+str(Om)+'_arc'+str(res_arcsec)+'"'+'_vres='+str(vres)+'kmps_'+info+gradtext
     if SNR_thresh is not None: t += '_snr'+str(SNR_thresh)
-    '''
-    #--------From Kewley 2002------------------
-    logOHsol = 8.93 #log(O/H)+12 value used for Solar metallicity in earlier MAPPINGS in 2001
-    log_ratio = np.log10(np.divide(mapn2,mapo2))
-    met_map = np.log10(1.54020 + 1.26602*log_ratio + 0.167977*log_ratio**2) + 8.93
-    print np.median(met_map), np.mean(met_map), np.count_nonzero(~np.isnan(met_map)) #
-    t += '_KD02'
-    '''
-    #-------From Dopita 2016------------------------------
-    logOHsol = 8.77 #log(O/H)+12 value used for Solar metallicity in MAPPINGS-V, Dopita 2016
-    log_ratio = np.log10(np.divide(mapn2,np.add(maps2a,maps2b))) + 0.264*np.log10(np.divide(mapn2,mapha))
-    ofile.write('log_ratio med, min '+str(np.median(log_ratio))+' '+str(np.min(log_ratio))+'\n') #
-    logOHobj_map = log_ratio + 0.45*(log_ratio + 0.3)**5 # + 8.77
-    ofile.write('logOHobj_map before conversion med, min '+str(np.median(logOHobj_map))+' '+str(np.min(logOHobj_map))+'\n') #
-    t += '_D16'
     
+    if args.useKD:
+        #--------From Kewley 2002------------------
+        logOHsol = 8.93 #log(O/H)+12 value used for Solar metallicity in earlier MAPPINGS in 2001
+        log_ratio = np.log10(np.divide(mapn2,mapo2))
+        ofile.write('log_ratio med, min '+str(np.median(log_ratio))+' '+str(np.min(log_ratio))+'\n') #
+        logOHobj_map = np.log10(1.54020 + 1.26602*log_ratio + 0.167977*log_ratio**2) #+ 8.93
+        ofile.write('logOHobj_map before conversion med, min '+str(np.median(logOHobj_map))+' '+str(np.min(logOHobj_map))+'\n') #
+        t += '_KD02'
+    else:
+        #-------From Dopita 2016------------------------------
+        logOHsol = 8.77 #log(O/H)+12 value used for Solar metallicity in MAPPINGS-V, Dopita 2016
+        log_ratio = np.log10(np.divide(mapn2,np.add(maps2a,maps2b))) + 0.264*np.log10(np.divide(mapn2,mapha))
+        ofile.write('log_ratio med, min '+str(np.median(log_ratio))+' '+str(np.min(log_ratio))+'\n') #
+        logOHobj_map = log_ratio + 0.45*(log_ratio + 0.3)**5 # + 8.77
+        ofile.write('logOHobj_map before conversion med, min '+str(np.median(logOHobj_map))+' '+str(np.min(logOHobj_map))+'\n') #
+        t += '_D16'    
     #---------------------------------------------------
     Z_map = 10**(logOHobj_map) #converting to Z (in units of Z_sol) from log(O/H) + 12
     #Z_list = Z_map.flatten()
     Z_list =logOHobj_map.flatten()
     ofile.write('Z_list after conversion med, mean, min '+str(np.median(Z_list))+' '+str(np.mean(Z_list))+' '+str(np.min(Z_list))+'\n') #
+    ofile.close()
     '''
     #--to print metallicity histogram: debugging purpose------
     plt.hist(np.log10(Z_list), 100, range =(-1, 50)) #
@@ -220,29 +299,47 @@ def metallicity(mapcube, wlist, llist, final_pix_per_beam, errorcube=None, SNR_t
     '''
     cbarlab = 'log(Z/Z_sol)'
     if getmap:
-        map = plotmap(Z_map, t, 'Metallicity', cbarlab, galsize, galsize/np.shape(mapcube)[0], cmin = cmin, cmax =cmax, hide = hide, saveplot=saveplot, islog=False)
+        map = plotmap(logOHobj_map, t, 'Metallicity', cbarlab, galsize, galsize/np.shape(mapcube)[0], cmin = cmin, cmax =cmax, hide = hide, saveplot=saveplot, islog=False)
     else:
-        if args.inspect: fig = plt.figure(figsize=(14,10))
-        else: fig = plt.figure(figsize=(8,6))
-        fig.subplots_adjust(hspace=0.7, top=0.85, bottom=0.1, left=0.1, right=0.95)
-        ax = plt.subplot(111)
-        plt.scatter(d.flatten(),Z_list, s=10, lw=0, c='b', label='pixels')
-        if args.inspect:
-            plt.scatter(d.flatten(),(np.divide(mapn2,np.add(maps2a,maps2b))).flatten(), s=10, lw=0, c='b', marker='s', label='pixels NII/SII')
-            plt.scatter(d.flatten(),(np.divide(mapn2,mapha)).flatten(), s=10, lw=0, c='b', marker='^', label='pixels NII/Ha')
-        #plt.axhline(10**(8.6-logOHsol),c='k',lw=0.5, label='trust') #line below which metallicity values should not be trusted for Kewley 2002 diag
-        plt.plot(np.arange(galsize/2), np.poly1d((logOHgrad, logOHcen))(np.arange(galsize/2)) - logOHsol,c='r', label='True gradient')
-        plt.axhline(0,c='k',linestyle='--',label='Zsol') #line for solar metallicity
+        if not hide:
+            if args.inspect: fig = plt.figure(figsize=(14,10))
+            else: fig = plt.figure(figsize=(8,6))
+            fig.subplots_adjust(hspace=0.7, top=0.85, bottom=0.1, left=0.1, right=0.95)
+            ax = plt.subplot(111)
+            plt.scatter(d.flatten(),Z_list, s=10, lw=0, c='b', label='pixels')
+            if args.inspect:
+                plt.scatter(d.flatten(),(np.divide(mapn2,np.add(maps2a,maps2b))).flatten(), s=10, lw=0, c='b', marker='s', label='pixels NII/SII')
+                plt.scatter(d.flatten(),(np.divide(mapn2,mapha)).flatten(), s=10, lw=0, c='b', marker='^', label='pixels NII/Ha')
+            #plt.axhline(10**(8.6-logOHsol),c='k',lw=0.5, label='trust') #line below which metallicity values should not be trusted for Kewley 2002 diag
+            plt.plot(np.arange(galsize/2), np.poly1d((logOHgrad, logOHcen))(np.arange(galsize/2)) - logOHsol,c='r', label='True gradient')
+            plt.axhline(0,c='k',linestyle='--',label='Zsol') #line for solar metallicity
+            plt.xlabel('Galactocentric distance (kpc)')
+            plt.ylabel(cbarlab)
+            plt.xlim(0,galsize/2)
+            plt.legend()
+            plt.title(t)
+            if args.inspect: plt.ylim(-1,3)
+            else: plt.ylim(-1,1)
+            if saveplot:
+                fig.savefig(path+t+'.png')
         #---to compute apparent gradient and scatter---
         if calcgradient:
+            ofile = open(outputfile,'a')
             ofile.write('Fitting gradient..'+'\n')
+            ofile.close()
             try:
                 d_list = np.ma.masked_array(d.flatten(), Z_list.mask)
                 Z_list = np.ma.compressed(Z_list)
                 d_list = np.ma.compressed(d_list)            
+                if len(Z_list) == 0: raise ValueError
                 linefit, linecov = np.polyfit(d_list, Z_list, 1, cov=True)
+                ofile = open(outputfile,'a')
                 ofile.write('Fit paramters: '+str(linefit)+'\n')
                 ofile.write('Fit errors: '+str(linecov)+'\n')
+                ofile.close()
+                if args.toscreen:
+                    print 'Fit paramters: '+str(linefit)
+                    print 'Fit errors: '+str(linecov)
                 if not nowrite:
                     gradfile = 'met_grad_log_paint'
                     if scale_exptime: gradfile += '_exp'
@@ -250,16 +347,16 @@ def metallicity(mapcube, wlist, llist, final_pix_per_beam, errorcube=None, SNR_t
                     gradfile += '.txt'
                     if not os.path.exists(gradfile):
                         head = '#File to store metallicity gradient information for different telescope parameters, as pandas dataframe\n\
-    #Columns are:\n\
-    #simulation : name of simulation from which star particles were extracted\n\
-    #res_arcsec : spatial resoltn of telescope\n\
-    #vres : spectral resoltn of telescope\n\
-    #pow, size : smoothing parameters, assuming Moffat profile\n\
-    #SNR_thresh : SNR threshold applied before fitting the metallicity gradient, if any\n\
-    #slope, intercept : fitted parameters\n\
-    #scatter : RMS deviation = sqrt((sum of squared deviation from fit)/ number of data points)\n\
-    #by Ayan\n\
-    simulation  res_arcsec   res_phys   vres        power   size    logOHcen        logOHgrad       SNR_thresh      slope       slope_u     intercept       intercept_u       scale_exptime       realisation\n'
+#Columns are:\n\
+#simulation : name of simulation from which star particles were extracted\n\
+#res_arcsec : spatial resoltn of telescope\n\
+#vres : spectral resoltn of telescope\n\
+#pow, size : smoothing parameters, assuming Moffat profile\n\
+#SNR_thresh : SNR threshold applied before fitting the metallicity gradient, if any\n\
+#slope, intercept : fitted parameters\n\
+#scatter : RMS deviation = sqrt((sum of squared deviation from fit)/ number of data points)\n\
+#by Ayan\n\
+simulation  res_arcsec   res_phys   vres        power   size    logOHcen        logOHgrad       SNR_thresh      slope       slope_u     intercept       intercept_u       scale_exptime       realisation\n'
                         open(gradfile,'w').write(head)
                     with open(gradfile,'a') as fout:
                         if args.parm is not None: output = '\n'+fn+'\t\t'+str(res_arcsec)+'\t\t'+str(final_pix_per_beam*galsize/np.shape(mapcube)[0])+'\t\t'+str(vres)+'\t\t'+str(parm[0])+'\t\t'+str(parm[1])+'\t\t'+\
@@ -271,21 +368,13 @@ def metallicity(mapcube, wlist, llist, final_pix_per_beam, errorcube=None, SNR_t
                         fout.write(output)
                     
                 x_arr = np.arange(0,10,0.1)
-                plt.plot(x_arr, np.poly1d(linefit)(x_arr), c='b',label='Inferred gradient')
-            except (TypeError, IndexError):
+                if not hide: plt.plot(x_arr, np.poly1d(linefit)(x_arr), c='b',label='Inferred gradient')
+            except (TypeError, IndexError, ValueError):
+                ofile = open(outputfile,'a')
                 ofile.write('No data points for vres= '+str(vres)+' above given SNR_thresh of '+str(SNR_thresh)+'\n')
+                ofile.close()
                 pass
             
-        plt.xlabel('Galactocentric distance (kpc)')
-        plt.ylabel(cbarlab)
-        plt.xlim(0,galsize/2)
-        plt.legend()
-        plt.title(t)
-        if args.inspect: plt.ylim(-1,3)
-        else: plt.ylim(-1,1)
-        if saveplot:
-            fig.savefig(path+t+'.png')
-    ofile.close()
 #-------------Fucntion for fitting multiple lines----------------------------
 def fit_all_lines(wlist, llist, wave, flam, resoln, pix_i, pix_j, nres=5, z=0, z_err=0.0001, silent=True, showplot=False, outputfile='junk.txt') :
     ofile = open(outputfile,'a')
@@ -400,7 +489,7 @@ def fitline(wave, flam, wtofit, resoln, z=0, z_err=0.0001):
     popt, pcov = curve_fit(lambda x, *p: su.gaus(x, len(wtofit), *p),wave,flam,p0= p_init, max_nfev=10000, bounds = (lbound, ubound))
     return popt, pcov
 #-------------------------------------------------------------------------------------------
-def makemapcube(ppv, dispsol, wlist, llist, vres, outputfile='junk.txt'):
+def makemapcube(ppv, dispsol, wlist, llist, vres, outputfile='junk.txt', args=None):
     if len(dispsol) != np.shape(ppv)[2]:
         ofile = open(outputfile,'a')
         ofile.write('Length of dispersion array mismatch.'+'\n')
@@ -412,6 +501,7 @@ def makemapcube(ppv, dispsol, wlist, llist, vres, outputfile='junk.txt'):
     resoln = c/vres
     for i in range(x):
         for j in range(x):
+            dummytime = time.time() #
             flam = np.array(ppv[i,j,:])/dispsol #converting flux to per wavelength unit (i.e. ergs/s/pc^2/A), before sending off to fitting routine
             idx = np.where(flam<0)[0]
             if len(idx) > 1:
@@ -419,12 +509,13 @@ def makemapcube(ppv, dispsol, wlist, llist, vres, outputfile='junk.txt'):
                 if idx[-1] == len(flam)-1 : idx = idx[:-1]
                 flam[idx]=(flam[idx-1] + flam[idx+1])/2. # replacing negative fluxes with average of nearest neighbours
             mapcube[i,j,:], errorcube[i,j,:] = fit_all_lines(wlist, llist, dispsol, flam, resoln, i, j, nres=5, z=0, z_err=0.0001, silent=True, outputfile=outputfile) #put fluxes fit by fitting routine in each cell of map
+            if args.toscreen: print 'deb425: time taken to fit spectrum in cell',i,j,'=',(time.time() - dummytime)/60.
         ofile = open(outputfile,'a')
         ofile.write('Fit row '+str(i)+' of '+str(x-1)+'\n')
         ofile.close()
     return mapcube, errorcube
 #-------------------------------------------------------------------------------------------
-def emissionmap(mapcube, llist, line, errorcube=None, SNR_thresh=None, saveplot=False, hide=False, cmin=None, cmax=None, fitsname=None):
+def emissionmap(mapcube, llist, line, errorcube=None, SNR_thresh=None, saveplot=False, hide=False, cmin=None, cmax=None, fitsname=''):
     map = mapcube[:,:,np.where(llist == line)[0][0]]
     map = np.ma.masked_where(map<0., map)
     if errorcube is not None:
@@ -576,50 +667,98 @@ def get_disp_array(vdel, vdisp, vres, nhr, nbin=1000, c=3e5, wmin=None, wmax=Non
         bin_index = -999 #dummy, not required if spec_smear is turned OFF
     return w, wmin, wmax, new_w, nwbin, wlist, llist, bin_index
 #-------------------------------------------------------------------------------------------
-def spec(s, Om, res, res_phys, final_pix_size, wmin=None, wmax=None, changeunits= False, spec_smear=False, addnoise = False, saveplot=False, smooth=False, ker = None, parm=None, hide=False, maketheory=False, scale_exptime=False, fixed_SNR=None, outputfile='junk.txt'):
+def spec(s, Om, res, res_phys, final_pix_size, wmin=None, wmax=None, changeunits= False, spec_smear=False, addnoise = False, \
+saveplot=False, smooth=False, ker = None, parm=None, hide=False, maketheory=False, scale_exptime=False, fixed_SNR=None, \
+outputfile='junk.txt', H2R_filename=None, convolved_filename=None, skynoise_cube=None, args=None):
     global info, gradient_painted, gradtext
     w, wmin, wmax, new_w, nwbin, wlist, llist, bin_index = get_disp_array(vdel, vdisp, vres, nhr, wmin=wmin, wmax=wmax, spec_smear=spec_smear)
-    #-------------------------------------------------------------------------------------------
-    g,x,y = calcpos(s, galsize, res)
-    ppv = np.zeros((g,g,nwbin - 1))
-    funcar = readSB(wmin, wmax)
     cbarlab = 'Log surface brightness in erg/s/pc^2' #label of color bar
     if changeunits: 
         cbarlab = cbarlab[:cbarlab.find(' in ')+4] + 'erg/s/cm^2/A' #label would be ergs/s/pc^2/A if we choose to change units to flambda
-    #-------------------------------------------------------------------------------------------
-    
-    for j in range(len(s)):
+    if H2R_filename and os.path.exists(H2R_filename):
+        ppv = fits.open(H2R_filename)[0].data
         ofile = open(outputfile,'a')
-        ofile.write('Particle '+str(j+1)+' of '+str(len(s))+'\n')
-        vz = float(s['vz'][j])
-        a = int(round(s['age(MYr)'][j]))
-        f = np.multiply(funcar[a](w),(300./1e6)) ### to scale the continuum by 300Msun, as the ones produced by SB99 was for 1M Msun
-        flist=[]
-        for l in llist:
-            try: flist.append(s[l][j])
-            except: continue
-        flist = np.multiply(np.array(flist), const)
-        
-        for i, fli in enumerate(flist):
-            f = gauss(w, f, wlist[i], fli, vdisp, vz) #adding every line flux on top of continuum
-        if changeunits:
-            f /= (w*3.086e18**2) #changing units for David Fisher: from ergs/s to ergs/s/A; the extra factor is to make it end up as /cm^2 insted of /pc^2
-        if spec_smear: 
-            f = [f[bin_index == ii].sum() for ii in range(1, len(new_w))]
-        ppv[int(x[j]/res)][int(y[j]/res)][:] += f #ergs/s
+        ofile.write('Reading existing H2R file cube from '+H2R_filename+'\n')
         ofile.close()
-    ofile = open(outputfile,'a')
-    ofile.write('Done reading in all HII regions in '+str((time.time() - start_time)/60)+' minutes.\n')
-    ofile.close()
+    else:
+        #-------------------------------------------------------------------------------------------
+        g,x,y = calcpos(s, galsize, res)
+        ppv = np.zeros((g,g,nwbin - 1))
+        funcar = readSB(wmin, wmax)
+        #-------------------------------------------------------------------------------------------
+    
+        for j in range(len(s)):
+            ofile = open(outputfile,'a')
+            ofile.write('Particle '+str(j+1)+' of '+str(len(s))+'\n')
+            vz = float(s['vz'][j])
+            a = int(round(s['age(MYr)'][j]))
+            f = np.multiply(funcar[a](w),(300./1e6)) ### to scale the continuum by 300Msun, as the ones produced by SB99 was for 1M Msun
+            flist=[]
+            for l in llist:
+                try: flist.append(s[l][j])
+                except: continue
+            flist = np.multiply(np.array(flist), const)
+        
+            for i, fli in enumerate(flist):
+                f = gauss(w, f, wlist[i], fli, vdisp, vz) #adding every line flux on top of continuum
+            if changeunits:
+                f /= (w*3.086e18**2) #changing units for David Fisher: from ergs/s to ergs/s/A; the extra factor is to make it end up as /cm^2 insted of /pc^2
+            if spec_smear: 
+                f = [f[bin_index == ii].sum() for ii in range(1, len(new_w))]
+            ppv[int(x[j]/res)][int(y[j]/res)][:] += f #ergs/s
+            ofile.close()
+        ofile = open(outputfile,'a')
+        ofile.write('Done reading in all HII regions in '+str((time.time() - start_time)/60)+' minutes.\n')
+        ofile.close()
+        write_fits(H2R_filename, ppv, fill_val=np.nan, outputfile=outputfile)
     #-------------------------Now ideal PPV is ready: do whatever with it------------------------------------------------------------------
     
     if spec_smear: w = new_w[1:]
-    if smooth:
-        skynoise = getskynoise(w, final_pix_size) if addnoise else None
-        ppv= smoothcube(ppv, res, res_phys, skynoise=skynoise, parm=parm, addnoise = addnoise, maketheory=maketheory, changeunits=changeunits, fixed_SNR=fixed_SNR, outputfile=outputfile) #spatially smooth the PPV using certain parameter set
-        res = np.round(galsize/np.shape(ppv)[0],2) #kpc
+    if smooth and not maketheory:
+        if skynoise_cube and os.path.exists(skynoise_cube):
+            skynoise = fits.open(skynoise_cube)[0].data
+            ofile = open(outputfile,'a')
+            ofile.write('Reading existing skynoise cube from '+skynoise_cube+'\n')
+            ofile.close()
+        elif addnoise:
+            ofile = open(outputfile,'a')
+            ofile.write('Computing skynoise cube..\n')
+            ofile.close()
+            skynoise = getskynoise(w, final_pix_size)            
+            write_fits(skynoise_cube, skynoise, fill_val=np.nan, outputfile=outputfile)
+        else: skynoise = None
+        if os.path.exists(convolved_filename): #read it in if the convolved cube already exists
+            ofile = open(outputfile,'a')
+            ofile.write('Reading existing convolved cube from '+convolved_filename+'\n')
+            ofile.close()
+        else: #make the convolved cube and save it if it doesn't exist already
+            ker, sig, pow, size, fwhm, new_res, dummmy = getsmoothparm(parm, ker, res, res_phys)
+            map = rebin(ppv[:,:,0], res, new_res)
+            ppv_rebinned = np.zeros((np.shape(map)[0],np.shape(map)[1],np.shape(ppv)[2]))
+            ppv_rebinned[:,:,0] = map
+            for ind in range(1,np.shape(ppv)[2]):
+                ppv_rebinned[:,:,ind] = rebin(ppv[:,:,ind], res, new_res) #re-bin 2d array before convolving to make things faster(previously each pixel was of size res)    
+            ofile = open(outputfile,'a')
+            ofile.write('Using '+ker+' kernel.\nUsing parameter set: sigma= '+str(sig)+', size= '+str(size,)+'\n')
+            ofile.close()
+            if args.toscreen: print 'deb652: trying to parallely convolve..' #
+            binned_cubename = path + 'temp_binned_cube.fits'
+            write_fits(binned_cubename, ppv_rebinned, fill_val=np.nan, outputfile=outputfile, silent=True)
+            funcname = HOME+'/models/enzo_model_code/parallel_convolve.py'
+            if args.toscreen: silent = ''
+            else: silent = ' --silent'
+            command = 'mpirun -np '+str(ncores)+' python '+funcname+' --parallel --sig '+str(sig)+' --pow '+str(pow)+' --size '+str(size)+' --ker '+ker+\
+            ' --convolved_filename '+convolved_filename+' --outputfile '+outputfile+' --binned_cubename '+binned_cubename + silent
+            subprocess.call([command],shell=True)
+            subprocess.call(['rm -r '+binned_cubename],shell=True)
+            
+        convolved_cube = fits.open(convolved_filename)[0].data #reading in convolved cube from file
+        ppv= smoothcube(convolved_cube, res, res_phys, skynoise=skynoise, parm=parm, addnoise = addnoise, maketheory=maketheory, \
+        changeunits=changeunits, fixed_SNR=fixed_SNR, outputfile=outputfile, silent=True, units_in_photon=False) #spatially smooth the PPV using certain parameter set
+        
+    res = np.round(galsize/np.shape(ppv)[0],2) #kpc
     ofile = open(outputfile,'a')
-    ofile.write('Final physical resolution on target frame = '+str(res)+' kpc'+'\n')
+    ofile.write('Final pixel size on target frame = '+str(res)+' kpc'+' and shape = ('+str(np.shape(ppv)[0])+','+str(np.shape(ppv)[1])+','+str(np.shape(ppv)[2])+') \n')
     
     #-------------------------Now realistic (smoothed, noisy) PPV is ready------------------------------------------------------------------
     if not hide: 
@@ -646,16 +785,17 @@ def spec(s, Om, res, res_phys, final_pix_size, wmin=None, wmax=None, changeunits
     ofile.close()
     return ppv                
 #-------------------------------------------------------------------------------------------
-def inspectmap(s, Om, res, res_phys, line='OIII5007', cmin=None, cmax=None, ppvcube=None, mapcube=None, errorcube=None, SNR_thresh=None, changeunits= False, saveplot=False, plotmet=False, hide=False):
+def inspectmap(s, Om, res, res_phys, line='OIII5007', cmin=None, cmax=None, ppvcube=None, mapcube=None, errorcube=None, SNR_thresh=None, changeunits= False, saveplot=False, plotmet=False, hide=False, args=None):
     g,x,y = calcpos(s, galsize, res)
     
     g2=np.shape(ppvcube)[0]
     if plotmet:
-        print 'all HIIR n2, s2, ha medians', np.median(s['NII6584']), np.median(s['SII6730']), np.median(s['H6562'])
-        print 'all HIIR n2, s2, ha integrated', np.sum(s['NII6584']), np.sum(s['SII6730']), np.sum(s['H6562'])
         log_ratio = np.log10(np.divide(s['NII6584'],(s['SII6730']+s['SII6717']))) + 0.264*np.log10(np.divide(s['NII6584'],s['H6562']))
         logOHobj = log_ratio + 0.45*(log_ratio + 0.3)**5
-        print 'all HIIR Z/Zsol median', np.median(10**logOHobj)
+        if args.toscreen: 
+            print 'all HIIR n2, s2, ha medians', np.median(s['NII6584']), np.median(s['SII6730']), np.median(s['H6562'])
+            print 'all HIIR n2, s2, ha integrated', np.sum(s['NII6584']), np.sum(s['SII6730']), np.sum(s['H6562'])
+            print 'all HIIR Z/Zsol median', np.median(10**logOHobj)
         d = np.sqrt((x-galsize/2)**2 + (y-galsize/2)**2)
         plt.scatter(d,logOHobj,c='r',s=5,lw=0,label='indiv HII reg')
         plt.scatter(d,np.divide(s['NII6584'],(s['SII6730']+s['SII6717'])),c='r',s=5,lw=0,marker='s',label='indiv HII reg NII/SII')
@@ -667,21 +807,17 @@ def inspectmap(s, Om, res, res_phys, line='OIII5007', cmin=None, cmax=None, ppvc
         print 'DIG analysis: SII6717/Halpha ratio for indiv HII regions: min, max, median',\
         np.min(s['SII6717']/s['H6562']), np.max(s['SII6717']/s['H6562']), np.median(s['SII6717']/s['H6562']) #
         '''
-        tempn2 = np.zeros((g2,g2))
-        temps2a = np.zeros((g2,g2))
-        temps2b = np.zeros((g2,g2))
-        tempha = np.zeros((g2,g2))
-        for j in range(len(s)):
-            tempn2[int(x[j]*g2/galsize)][int(y[j]*g2/galsize)] += s['NII6584'][j]
-            temps2a[int(x[j]*g2/galsize)][int(y[j]*g2/galsize)] += s['SII6717'][j]
-            temps2b[int(x[j]*g2/galsize)][int(y[j]*g2/galsize)] += s['SII6730'][j]
-            tempha[int(x[j]*g2/galsize)][int(y[j]*g2/galsize)] += s['H6562'][j]
-    
-        print 'summed up HIIR n2, s2a, s2b, ha medians', np.median(tempn2), np.median(temps2a), np.median(temps2b), np.median(tempha)
-        print 'summed up HIIR n2, s2a, s2b, ha integrated', np.sum(tempn2), np.sum(temps2a), np.sum(temps2b), np.sum(tempha)
+        tempn2 = make2Dmap(s['NII6584'], x, y, g2, galsize/g2)
+        temps2a = make2Dmap(s['SII6717'], x, y, g2, galsize/g2)
+        temps2b = make2Dmap(s['SII6730'], x, y, g2, galsize/g2)
+        tempha = make2Dmap(s['H6562'], x, y, g2, galsize/g2)
+        
         log_ratio = np.log10(np.divide(tempn2,(temps2a+temps2b))) + 0.264*np.log10(np.divide(tempn2,tempha))
         logOHobj = log_ratio + 0.45*(log_ratio + 0.3)**5
-        print 'all HIIR Z/Zsol median', np.median(10**logOHobj)
+        if args.toscreen: 
+            print 'summed up HIIR n2, s2a, s2b, ha medians', np.median(tempn2), np.median(temps2a), np.median(temps2b), np.median(tempha)
+            print 'summed up HIIR n2, s2a, s2b, ha integrated', np.sum(tempn2), np.sum(temps2a), np.sum(temps2b), np.sum(tempha)
+            print 'all HIIR Z/Zsol median', np.median(10**logOHobj)
         b = np.linspace(-g2/2 + 1,g2/2,g2)*(galsize)/g2 #in kpc
         d = np.sqrt(b[:,None]**2+b**2)
         plt.scatter(d.flatten(),logOHobj.flatten(),c='g',s=5,lw=0,label='summed up HII reg')
@@ -738,11 +874,12 @@ def inspectmap(s, Om, res, res_phys, line='OIII5007', cmin=None, cmax=None, ppvc
                 maps2b = np.ma.masked_where(maps2b/maps2b_u <SNR_thresh, maps2b)
                 mapha = np.ma.masked_where(mapha/mapha_u <SNR_thresh, mapha)
 
-        print 'mapn2, s2a, s2b, ha max',np.max(mapn2), np.max(maps2a), np.max(maps2b), np.max(mapha)
-        print 'mapn2, s2a, s2b, ha min',np.min(mapn2), np.min(maps2a), np.min(maps2b), np.min(mapha)
         g = np.shape(mapcube)[0]
-        print 'mapn2, s2a, s2b, ha integrated',np.sum(mapn2*(galsize*1000./g)**2), np.sum(maps2a*(galsize*1000./g)**2), np.sum(maps2b*(galsize*1000./g)**2), np.sum(mapha*(galsize*1000./g)**2), 'ergs/s' #
-        print '#cells=',g,'each cell=',galsize*1000./g,'pc'
+        if args.toscreen:
+            print 'mapn2, s2a, s2b, ha max',np.max(mapn2), np.max(maps2a), np.max(maps2b), np.max(mapha)
+            print 'mapn2, s2a, s2b, ha min',np.min(mapn2), np.min(maps2a), np.min(maps2b), np.min(mapha)
+            print 'mapn2, s2a, s2b, ha integrated',np.sum(mapn2*(galsize*1000./g)**2), np.sum(maps2a*(galsize*1000./g)**2), np.sum(maps2b*(galsize*1000./g)**2), np.sum(mapha*(galsize*1000./g)**2), 'ergs/s' #
+            print '#cells=',g,'each cell=',galsize*1000./g,'pc'
         if plotmet:
             map = plotmap(mapn2, 'NII6584'+' map after fitting', 'Metallicity', 'log flux(ergs/s/pc^2)', galsize, galsize/g, cmin = cmin, cmax =cmax, hide = hide, saveplot=saveplot, islog=True)
             map = plotmap(maps2a, 'SII6717'+' map after fitting', 'Metallicity', 'log flux(ergs/s/pc^2)', galsize, galsize/g, cmin = cmin, cmax =cmax, hide = hide, saveplot=saveplot, islog=True)
@@ -759,10 +896,10 @@ def calcpos(s, galsize, res):
     y = (s['y']-1500/2)*res + galsize/2
     return g, x, y
 #-------------------------------------------------------------------------------------------
-def make2Dmap(data, xi, yi, gridsize, res, domean=False, islog=False):
-    map = np.zeros((gridsize,gridsize))
+def make2Dmap(data, xi, yi, ngrid, res, domean=False, islog=False):
+    map = np.zeros((ngrid,ngrid))
     if domean:
-        count = np.zeros((gridsize,gridsize))
+        count = np.zeros((ngrid,ngrid))
     for i in range(len(data)):
         x = int(xi[i]/res)
         y = int(yi[i]/res)
@@ -777,59 +914,22 @@ def make2Dmap(data, xi, yi, gridsize, res, domean=False, islog=False):
         map[np.isnan(map)] = 0
     return map 
 #-------------------------------------------------------------------------------------------
-def smoothmap(k, nslice, map, res, res_phys, new_cube=None, skynoiseslice=None, parm=None, ker='moff', maskzero=False, addnoise = False, maketheory=False, silent = False, changeunits=False, units_in_photon=False, fixed_SNR=None, outputfile='junk.txt'):
-    ofile = open(outputfile,'a')
-    ofile.write('smoothing slice '+str(k+1)+' of '+str(nslice)+'\n')
-    ker, sig, pow, size, fwhm, new_res, dummmy = getsmoothparm(parm, ker, res, res_phys)
-    map = rebin(map, res, new_res) #re-bin 2d array before convolving to make things faster(previously each pixel was of size res)    
-    if ker == 'gauss':
-        kernel = con.Gaussian2DKernel(sig, x_size = size, y_size = size)
-        if not silent: ofile.write('Using Gaussian kernel.\nUsing parameter set: FWHM= '+str(fwhm)+', size= '+str(size,)+'\n')
-    elif ker == 'moff':    
-        kernel = con.Moffat2DKernel(sig, pow, x_size = size, y_size = size)
-        if not silent: ofile.write('Using Moffat kernel.\nUsing parameter set: FWHM= '+str(fwhm)+', pow= '+str(pow)+', size= '+str(size)+' pixels.'+'\n')
-    
-    map = con.convolve(map, kernel, boundary = 'fill', fill_value = 0.0, normalize_kernel=True)
-    if not maketheory: map = makeobservable(map, skynoiseslice=skynoiseslice, addnoise =addnoise, changeunits = changeunits, silent=silent, units_in_photon=units_in_photon, fixed_SNR=fixed_SNR, outputfile=outputfile)
-    ofile.close()
-    if new_cube is not None:
-        new_cube[:,:,k] = map
-    else:
-        return map
-#-----------------------------parallelised--------------------------------------------------------------
-def smoothcube(cube, res, res_phys, skynoise=None, addnoise = False, maketheory = False, parm=None, changeunits=False, fixed_SNR=None, outputfile='junk.txt'):
+def smoothcube(cube, res, res_phys, skynoise=None, addnoise = False, maketheory = False, parm=None, changeunits=False, \
+fixed_SNR=None, outputfile='junk.txt', silent=True, units_in_photon=False):
     nslice = np.shape(cube)[2]
-    skynoiseslice = skynoise[0] if skynoise is not None else None
-    map = smoothmap(0, nslice, cube[:,:,0], res, res_phys, skynoiseslice = skynoiseslice, addnoise = addnoise, maketheory = maketheory, parm=parm, silent = True, changeunits=changeunits, fixed_SNR=fixed_SNR, outputfile=outputfile) #
-    g = np.shape(map)[0]
-    start_time2 = time.time()
-    new_cube = np.zeros((g,g,nslice))
-    new_cube[:,:,0] = map
+    new_cube = np.zeros(np.shape(cube))
     
-    for k in range(1,nslice):
+    for k in range(nslice):
+        ofile = open(outputfile,'a')
+        ofile.write('Making observable slice '+str(k+1)+' of '+str(nslice)+'\n')
+        ofile.close()   
         skynoiseslice = skynoise[k] if skynoise is not None else None
-        map = smoothmap(k, nslice, cube[:,:,k], res, res_phys, skynoiseslice = skynoiseslice, addnoise = addnoise, maketheory = maketheory, parm=parm, silent = True, changeunits=changeunits, fixed_SNR=fixed_SNR, outputfile=outputfile)
-        new_cube[:,:,k] = map
-    
-    '''
-    #----attempt at parallelisation: not functional yet----
-    new_cube = mp.Array('d', int(g*g*nslice))
-    new_cube = np.frombuffer(new_cube.get_obj()).reshape((g,g,nslice))
-    new_cube[:,:,0] = map
-    p = mp.Pool(mp.cpu_count())
-    for k in range(1,12):#nslice):
-        skynoiseslice = skynoise[k] if skynoise is not None else None
-        p.apply_async(smoothmap, (k, nslice, cube[:,:,k], res, res_phys), {"new_cube":new_cube, "skynoiseslice":skynoiseslice, "addnoise":addnoise, "maketheory":maketheory, "parm":parm, "silent":True, "changeunits":changeunits})              
-    p.close()
-    p.join()
-    
-    print 'time taken to do 12 slices is %s mins'% ((time.time() - start_time2)/60) #
-    print np.where(np.sum(new_cube,axis=(0,1))>0)[0] #
-    sys.exit() #
-    '''
+        new_cube[:,:,k] = makeobservable(cube[:,:,k], skynoiseslice=skynoiseslice, addnoise =addnoise, changeunits = changeunits, silent=silent, units_in_photon=units_in_photon, fixed_SNR=fixed_SNR, outputfile=outputfile)
+   
     return new_cube
 #-------------------------------------------------------------------------------------------
 def makeobservable(map, skynoiseslice=None, addnoise=False, changeunits=False, silent=False, units_in_photon=False, fixed_SNR=None, outputfile='junk.txt'):
+    global exptime
     size = galsize/np.shape(map)[0]
     factor = flux_ratio * exptime * el_per_phot / gain #
     if not units_in_photon: factor /= (planck * nu) #to bring it to units of photons, or rather, ADUs
@@ -860,6 +960,7 @@ def getskynoise(wave, final_pix_size):
     return interp_noise
 #-------------------------------------------------------------------------------------------
 def makenoisy(data, skynoiseslice=None, factor=None, silent=False, fixed_SNR=None, outputfile='junk.txt'):
+    global exptime
     ofile = open(outputfile,'a')
     dummy = copy.copy(data)
     size = galsize/np.shape(data)[0]
@@ -871,14 +972,17 @@ def makenoisy(data, skynoiseslice=None, factor=None, silent=False, fixed_SNR=Non
     else:
         noisydata = np.random.poisson(lam=data, size=None) #adding poisson noise to counts (electrons)
         noisydata = noisydata.astype(float)
+        #dummy = plotmap(noisydata, 'after poisson', 'junk', 'counts', galsize, galsize/np.shape(noisydata)[0], islog=False) #
         readnoise = np.sqrt(2*7) * np.random.normal(loc=0., scale=3.5, size=np.shape(noisydata)) #to draw gaussian random variables from distribution N(0,3.5) where 3.5 is width in electrons per pixel
                                     #sqrt(14) is to account for the fact that for SAMI each spectral fibre is 2 pix wide and there are 7 CCD frames for each obsv
         noisydata += readnoise #adding readnoise
+        #dummy = plotmap(noisydata, 'after readnoise', 'junk', 'counts', galsize, galsize/np.shape(noisydata)[0], islog=False) #
         if skynoiseslice is not None and skynoiseslice != 0: 
             skynoise = np.random.normal(loc=0., scale=np.abs(skynoiseslice), size=np.shape(noisydata)) #drawing from normal distribution about a sky noise value at that particular wavelength
             noisydata /= exptime #converting to electrons/s just to add skynoise, bcz skynoise is also in el/s units
             noisydata += skynoise #adding sky noise
             noisydata *= exptime #converting back to electrons units
+        #dummy = plotmap(noisydata, 'after skynoise', 'junk', 'counts', galsize, galsize/np.shape(noisydata)[0], islog=False) #
 
     noisydata /= factor #converting back to physical units from counts (electrons)
     if not silent:
@@ -894,8 +998,8 @@ def plotmap(map, title, savetitle, cbtitle, galsize, res, cmin = None, cmax = No
     fig = plt.figure(figsize=(8,8))
     fig.subplots_adjust(hspace=0.7, top=0.9, bottom=0.1, left=0.1, right=0.9)
     ax = plt.subplot(111)
-    map = np.ma.masked_where(map<0, map)
     if islog:
+        map = np.ma.masked_where(map<0, map)
         if cmin is None: cmin = np.min(np.log10(map))
         if cmax is None: cmax = np.max(np.log10(map))     
         map = np.ma.masked_where(np.log10(map)<cmin, map)
@@ -925,9 +1029,9 @@ def getfn(outtag,fn,Om):
 #-------------------------------------------------------------------------------------------
 def getsmoothparm(parm, ker, res, res_phys):
     if parm is None:
-        pow, size = 4.7, 10 #power and sigma parameters for 2D Moffat kernal in pixel units
+        pow, size = 4.7, 5 #power and sigma parameters for 2D Moffat kernal in pixel units
     else:
-        pow, size = parm
+        pow, size = parm[0], int(parm[1])
     #------------------------------------------------------------------
     #-----Compute effective seeing i.e. FWHM as: the resolution on sky (res_arcsec) -> physical resolution on target frame (res_phys) -> pixel units (fwhm)
     fwhm = min(res_phys/res, pix_per_beam) #choose the lesser of 10 pixels per beam or res/res_phys pixels per beam
@@ -946,24 +1050,38 @@ def getsmoothparm(parm, ker, res, res_phys):
     return ker, sig, pow, size, fwhm, new_res, final_pix_size
 #-------------------------------------------------------------------------------------------
 def getfitsname(parm, ker, res, res_phys, Om, wmin, wmax, args):
-    global info, gradient_painted, gradtext
+    global info, gradient_painted, gradtext, exptime
     wlist, llist = readlist()
     if wmin is None: wmin = wlist[0]-50.
     if wmax is None: wmax = wlist[-1]+50.
     info = ''
     if args.spec_smear: info += '_specsmeared_'+str(int(vres))+'kmps'
+    info1 = info
     if args.smooth:
         ker, sig, pow, size, fwhm, new_res, final_pix_size = getsmoothparm(parm, ker, res, res_phys)
         info += '_smeared_'+ker+'_parm'+str(fwhm)+','+str(sig)+','+str(pow)+','+str(size)
     else: final_pix_size = res
     if args.changeunits: info += '_flambda'
+    info2 = info
     if args.addnoise: info += '_noisy'
     if args.fixed_SNR is not None: info += '_fixedSNR'+str(fixed_SNR)
     if not args.maketheory: info+= '_obs'
-    if args.scale_exptime: info += '_exp'+str(exptime)+'s'
+    if args.exp is not None:
+        exptime = float(args.exp)
+    else:
+        if args.scale_exptime:
+            exptime = float(args.scale_exptime)*(res/final_pix_size)**2 #increasing exposure time quadratically with finer resolution, with fiducial values of 600s for 0.5"
+        else:
+            exptime = float(240000)*(res/final_pix_size)**2 #sec
+    info += '_exp'+str(exptime)+'s'
     if args.multi_realisation: info += '_real'+str(args.multi_realisation)
-    fitsname = 'PPV_'+fn+'Om='+str(Om)+',arc='+str(res_arcsec)+'_'+str(wmin)+'-'+str(wmax)+'A' + info+ gradtext +'.fits'    
-    return fitsname, final_pix_size
+    
+    H2R_filename = 'H2R_'+fn+'Om='+str(Om)+'_'+str(wmin)+'-'+str(wmax)+'A' + info1+ gradtext+'.fits'
+    skynoise_cubename = 'skycube_'+'pixsize_'+str(final_pix_size)+'_'+str(wmin)+'-'+str(wmax)+'A'+info1+'.fits'
+    convolved_filename = 'convolved_'+fn+'Om='+str(Om)+',arc='+str(res_arcsec)+'_'+str(wmin)+'-'+str(wmax)+'A' + info2+ gradtext +'.fits'
+    fitsname = 'PPV_'+fn+'Om='+str(Om)+',arc='+str(res_arcsec)+'_'+str(wmin)+'-'+str(wmax)+'A' + info+ gradtext +'.fits'
+    
+    return fitsname, final_pix_size, H2R_filename, convolved_filename, skynoise_cubename
 #-------------------------------------------------------------------------------------------
 def write_fits(filename, data, fill_val=np.nan, silent=False, outputfile='junk.txt'):
     ofile = open(outputfile,'a')
@@ -994,7 +1112,7 @@ def factors(n):
     return list(reduce(list.__add__,([i, n//i] for i in range(1, int(n**0.5) + 1) if n % i == 0)))
 #-------------------End of functions------------------------------------------------------------------------
 #-------------------Begin main code------------------------------------------------------------------------
-global info, gradient_painted, gradtext
+global info, gradient_painted, gradtext, exptime, ncores
 col_ar=['m','blue','steelblue','aqua','lime','darkolivegreen','goldenrod','orangered','darkred','dimgray']
 logOHsun = 8.77
 outtag = '_sph_logT4.0_MADtemp_Z0.05,5.0_age0.0,5.0_lnII5.0,12.0_lU-4.0,-1.0_4D'
@@ -1058,6 +1176,12 @@ if __name__ == '__main__':
     parser.set_defaults(nowrite=False)
     parser.add_argument('--silent', dest='silent', action='store_true')
     parser.set_defaults(silent=False)
+    parser.add_argument('--get_scale_length', dest='get_scale_length', action='store_true')
+    parser.set_defaults(get_scale_length=False)
+    parser.add_argument('--toscreen', dest='toscreen', action='store_true')
+    parser.set_defaults(toscreen=False)
+    parser.add_argument('--useKD', dest='useKD', action='store_true')
+    parser.set_defaults(useKD=False)
 
     parser.add_argument('--scale_exptime')
     parser.add_argument('--multi_realisation')
@@ -1083,8 +1207,6 @@ if __name__ == '__main__':
     parser.add_argument("--wmax")
     parser.add_argument("--cmin")
     parser.add_argument("--cmax")
-    parser.add_argument("--fitsname")
-    parser.add_argument("--fittedcube")
     parser.add_argument("--rad")
     parser.add_argument("--gain")
     parser.add_argument("--exp")
@@ -1092,6 +1214,7 @@ if __name__ == '__main__':
     parser.add_argument("--snr")
     parser.add_argument("--Zgrad")
     parser.add_argument("--fixed_SNR")
+    parser.add_argument("--ncores")
     args, leftovers = parser.parse_known_args()
 
 
@@ -1150,14 +1273,6 @@ if __name__ == '__main__':
         res_arcsec = 0.5 #arcsec
     
     res_phys = res_arcsec*np.pi/(3600*180)*dist #kpc
-
-    if args.exp is not None:
-        exptime = float(args.exp)
-    else:
-        if args.scale_exptime:
-            exptime = float(args.scale_exptime)*(0.5/res_arcsec)**2 #increasing exposure time quadratically with finer resolution, with fiducial values of 600s for 0.5"
-        else:
-            exptime = 600 #sec = 10min exposure
 
     if args.line is not None:
         line = args.line
@@ -1241,8 +1356,20 @@ if __name__ == '__main__':
     else:
         fixed_SNR = None 
 
+    if args.ncores is not None:
+        ncores = int(args.ncores) #number of cores used in parallel segments
+    else:
+        ncores = mp.cpu_count()/2
+
     #-----------------------jobs fetched--------------------------------------------------------------------
     for i, Om in enumerate(Om_ar):
+        fitsname, final_pix_size, H2R_filename, convolved_filename, skynoise_cubename = getfitsname(parm, ker, res, res_phys, Om, wmin, wmax, args) # name of fits file to be written into
+        final_pix_per_beam = int(fitsname[fitsname.find('parm')+4:fitsname.find('parm')+4+(fitsname[fitsname.find('parm')+4:]).find(',')]) #the actual FWHM used while generating the ppv cube, extracted from its name
+        if args.toscreen: 
+            print 'deb1322: res_phys, final pix per beam, final pix size, final shape=', res_phys, final_pix_per_beam, final_pix_size, galsize/final_pix_size, 'kpc' #
+            print path+fitsname #
+            if not os.path.exists(path+fitsname): print 'ppv does not exist' #
+        #sys.exit() #
         if args.outfile is not None:
             outfile = args.outfile
         else:
@@ -1299,6 +1426,7 @@ if __name__ == '__main__':
             else: ofile.write('Ending wavelength of PPV cube at end of line list.'+'\n')
             if args.snr: ofile.write('Applying SNR cut-off= '+str(SNR_thresh)+' on fitted lines.'+'\n')
             else: ofile.write('No SNR cut-off will be applied.'+'\n')
+            ofile.write('Will run the parallel segments on '+str(ncores)+' cores.'+'\n')
             if args.smooth: 
                 if args.parm: ofile.write('Parameter for smoothing= '+str(parm[0])+', '+str(parm[1])+'\n')
                 else: ofile.write('Default smoothing parameter settings. Use --parm option to specify smearing parameters set.'+'\n')
@@ -1306,27 +1434,22 @@ if __name__ == '__main__':
                 else: ofile.write('Default Moffat profile for smoothing.'+'\n')
             if args.Zgrad: ofile.write('Using metallicity painted HII regions, with central logOH+12 = '+str(logOHcen)+', and gradient = '+str(logOHgrad)+' dex per kpc'+'\n')        
             else: ofile.write('No additional metallicity gradient painted.'+'\n')
-        #------------------------------------------------------
-        if args.fitsname is not None:
-            fitsname, final_pix_size = args.fitsname, res
-        else:
-            fitsname, final_pix_size = getfitsname(parm, ker, res, res_phys, Om, wmin, wmax, args) # name of fits file to be written into
-        if fitsname[-5:] != '.fits': fitsname += '.fits'
-        if not args.silent: ofile.write('Will be using/creating '+fitsname+' file.'+'\n')
-        final_pix_per_beam = int(fitsname[fitsname.find('parm')+4:fitsname.find('parm')+4+(fitsname[fitsname.find('parm')+4:]).find(',')]) #the actual FWHM used while generating the ppv cube, extracted from its name
-        
-        if args.fittedcube is not None:
-            fittedcube = args.fittedcube
-        else:
-            fittedcube = fitsname.replace('PPV','fitted-map-cube') # name of mapcube file to be read in
-        if fittedcube[-5:] != '.fits': fittedcube += '.fits'
+            ofile.write('Will be using/creating '+H2R_filename+' file.'+'\n')
+            ofile.write('Will be using/creating '+skynoise_cubename+' file.'+'\n')
+            ofile.write('Will be using/creating '+convolved_filename+' file.'+'\n')
+            ofile.write('Will be using/creating '+fitsname+' file.'+'\n')
         ofile.close()
-        
+        #------------------------------------------------------
+
+        fittedcube = fitsname.replace('PPV','fitted-map-cube') # name of mapcube file to be read in       
         s = ascii.read(getfn(outtag,fn,Om), comment='#', guess=False)
-        if args.ppv: 
-            ppvcube = spec(s, Om, res, res_phys, final_pix_size, wmin=wmin ,wmax=wmax, changeunits= args.changeunits, spec_smear = args.spec_smear, \
-            saveplot = args.saveplot, smooth=args.smooth, parm = parm, \
-            ker = ker, hide=args.hide, addnoise=args.addnoise, maketheory=args.maketheory, scale_exptime=args.scale_exptime, fixed_SNR=fixed_SNR, outputfile=outfile)
+        if args.get_scale_length:
+            scale_length = get_scale_length(s, args=args, outputfile=outfile)
+        elif args.ppv: 
+            ppvcube = spec(s, Om, res, res_phys, final_pix_size, wmin=wmin ,wmax=wmax, changeunits= args.changeunits, \
+            spec_smear = args.spec_smear, saveplot = args.saveplot, smooth=args.smooth, parm = parm, ker = ker, hide=args.hide, \
+            addnoise=args.addnoise, maketheory=args.maketheory, scale_exptime=args.scale_exptime, fixed_SNR=fixed_SNR, \
+            outputfile=outfile, H2R_filename=path+H2R_filename, convolved_filename=path+convolved_filename, skynoise_cube=path+skynoise_cubename, args=args)
             write_fits(path+fitsname, ppvcube, fill_val=np.nan, outputfile=outfile)        
         else:
             if not os.path.exists(path+fitsname):
@@ -1334,9 +1457,10 @@ if __name__ == '__main__':
                     ofile = open(outfile, 'a')
                     ofile.write('ppv file does not exist. Creating ppvcube..'+'\n')
                     ofile.close()
-                ppvcube = spec(s, Om, res, res_phys, final_pix_size, wmin=wmin ,wmax=wmax, changeunits= args.changeunits, spec_smear = args.spec_smear, \
-                saveplot = args.saveplot, smooth=args.smooth, parm = parm, \
-                ker = ker, hide=args.hide, addnoise=args.addnoise, maketheory=args.maketheory, scale_exptime=args.scale_exptime, fixed_SNR=fixed_SNR, outputfile=outfile)
+                ppvcube = spec(s, Om, res, res_phys, final_pix_size, wmin=wmin ,wmax=wmax, changeunits= args.changeunits, \
+                spec_smear = args.spec_smear, saveplot = args.saveplot, smooth=args.smooth, parm = parm, ker = ker, hide=args.hide, \
+                addnoise=args.addnoise, maketheory=args.maketheory, scale_exptime=args.scale_exptime, fixed_SNR=fixed_SNR, \
+                outputfile=outfile, H2R_filename=path+H2R_filename, convolved_filename=path+convolved_filename, skynoise_cube=path+skynoise_cubename, args=args)
                 write_fits(path+fitsname, ppvcube, fill_val=np.nan, outputfile=outfile)        
                 fittedcube = fitsname.replace('PPV','fitted-map-cube')
             else:
@@ -1370,7 +1494,7 @@ if __name__ == '__main__':
                     spec_at_point(ppvcube, dispsol, wlist, llist, X, Y, wmin=wmin ,wmax=wmax,  hide=args.hide, saveplot=args.saveplot, changeunits=args.changeunits, filename=fitsname)
         
             elif args.inspect and fittedcube == 'junk.fits':
-                inspectmap(s, Om, res, res_phys, line=line, cmin=cmin, cmax=cmax, ppvcube=ppvcube, mapcube=None, errorcube=None, SNR_thresh=None, changeunits= args.changeunits, saveplot=args.saveplot)
+                inspectmap(s, Om, res, res_phys, line=line, cmin=cmin, cmax=cmax, ppvcube=ppvcube, mapcube=None, errorcube=None, SNR_thresh=None, changeunits= args.changeunits, saveplot=args.saveplot, args=args)
             
             else:
                 fittederror =fittedcube.replace('map','error')
@@ -1387,11 +1511,17 @@ if __name__ == '__main__':
                         ofile = open(outfile, 'a')
                         ofile.write('Mapfile does not exist. Creating mapcube..'+'\n')
                         ofile.close()
-                    ppvcube = fits.open(path+fitsname)[0].data
-                    mapcube, errorcube = makemapcube(ppvcube, dispsol, wlist, llist, vres, outputfile=outfile) #call routine to measure ALL fluxes and make a flux map cube
-                    write_fits(path+fittedcube, mapcube, fill_val=np.nan, outputfile=outfile)        
-                    write_fits(path+fittederror, errorcube, fill_val=np.nan, outputfile=outfile)        
-
+                    if args.spec_smear: smear = ' --spec_smear '
+                    else: smear = ''
+                    if args.toscreen: silent = ''
+                    else: silent = ' --silent'
+                    funcname = HOME+'/models/enzo_model_code/parallel_fitting.py'
+                    command = 'mpirun -np '+str(ncores)+' python '+funcname+' --parallel --fitsname '+path+fitsname+' --vdel '+str(vdel)+\
+                    ' --vdisp '+str(vdisp)+' --vres '+str(vres)+' --nhr '+str(nhr)+' --wmin '+str(wmin)+' --wmax '+str(wmax)+\
+                    ' --fittedcube '+path+fittedcube+' --fittederror '+path+fittederror+' --outputfile '+outfile+smear+silent
+                    subprocess.call([command],shell=True)
+                    mapcube = fits.open(path+fittedcube)[0].data
+                    errorcube = fits.open(path+fittederror)[0].data
                 if args.bptpix: 
                     bpt_pixelwise(mapcube, wlist, llist, saveplot = args.saveplot)
                 elif args.met: 
@@ -1402,16 +1532,14 @@ if __name__ == '__main__':
                     SFRmap_real, SFRmapHa = SFRmaps(mapcube,wlist, llist, res, res_phys, getmap=args.getmap, cmin=cmin, cmax=cmax, saveplot = args.saveplot, hide=args.hide)
                 else: 
                     if not args.silent: ofile.write('Wrong choice. Choose from:\n --bptpix, --map, --sfr, --met, --ppv, --plotinteg, --plotspec'+'\n')
-                
+            
                 if args.inspect:
-                    inspectmap(s, Om, res, res_phys, line=line, cmin=cmin, cmax=cmax, ppvcube=ppvcube, mapcube=mapcube, errorcube=errorcube, SNR_thresh=SNR_thresh, changeunits= args.changeunits, saveplot=args.saveplot, plotmet=args.met, hide=args.hide)
-    ofile = open(outfile,'a')
-    if args.saveplot:
-        if not args.silent: ofile.write('Saved here: '+path+'\n')
+                    inspectmap(s, Om, res, res_phys, line=line, cmin=cmin, cmax=cmax, ppvcube=ppvcube, mapcube=mapcube, errorcube=errorcube, SNR_thresh=SNR_thresh, changeunits= args.changeunits, saveplot=args.saveplot, plotmet=args.met, hide=args.hide, args=args)
     #-------------------------------------------------------------------------------------------
-    if not args.silent: ofile.write('Done in %s minutes\n' % ((time.time() - start_time)/60))
-    if not args.hide:
-        plt.show(block=False)
-    else:
-        plt.close()
-    ofile.close()
+    if args.hide: plt.close()
+    else: plt.show(block=False)
+    if not args.silent:
+        ofile = open(outfile,'a')
+        if args.saveplot: ofile.write('Saved here: '+path+'\n')
+        ofile.write('Completed in %s minutes\n' % ((time.time() - start_time)/60))
+        ofile.close()
