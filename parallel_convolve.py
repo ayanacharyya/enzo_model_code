@@ -70,7 +70,7 @@ if __name__ == '__main__':
     if (rank == ncores-1): core_end = nslice # last PE gets the rest
     for k in range(core_start, core_end):
         convolved_cube_local[:,:,k] = con.convolve_fft(cube[:,:,k], kernel, boundary = 'fill', fill_value = 0.0, normalize_kernel=True)        
-        if not args.silent: print_mpi('Convolved slice '+str(k)+' of '+str(nslice)+' slices', args)
+        if not args.silent: print_mpi('Convolved slice '+str(k)+' of '+str(nslice)+' slices at: {:%Y-%m-%d %H:%M:%S}'.format(datetime.datetime.now()), args)
     comm.Barrier()
     comm.Allreduce(convolved_cube_local, convolved_cube, op=MPI.SUM)
     if rank ==0:

@@ -90,14 +90,36 @@ if __name__ == '__main__':
     core_start = rank * (ncells/ncores)
     core_end   = (rank+1) * (ncells/ncores)       
     if (rank == ncores-1): core_end = ncells # last PE gets the rest
+    if args.debug: print_mpi('Operating on cell '+str(core_start)+' to '+str(core_end)+' out of '+str(ncells)+' cells', args)
+    
     for k in range(core_start, core_end):
         i, j = k/x, k%x
-        mapcube_local[i,j,:], errorcube_local[i,j,:] = po.fit_all_lines(args, logbook, properties, properties.ppvcube[i,j,:], i, j, nres=5, z=0, z_err=0.0001)
-        if not args.silent: print_mpi('Fitted cell '+str(k)+' i.e. cell '+str(i)+','+str(j)+' of '+str(ncells)+' cells', args)
+        wave = np.array(properties.dispsol)  #converting to numpy arrays
+        flam = np.array(properties.ppvcube[i,j,:]) #in units ergs/s/A/pixel
+        idx = np.where(flam<0)[0]
+        if len(idx) > 0:
+            if idx[0] == 0: idx = idx[1:]
+            if idx[-1] == len(flam)-1 : idx = idx[:-1]
+            flam[idx]=(flam[idx-1] + flam[idx+1])/2. # replacing negative fluxes with average of nearest neighbours
+        
+        if args.debug:
+            print_mpi('Deb106: For pixel %d,%d:\n'%(i,j), args)
+            print_mpi('Deb110: flam in ergs/s/pc^2/A: Median, stdev, max, min= '+str(np.median(flam))+','+str(np.std(flam))+','+\
+str(np.max(flam))+','+str(np.min(flam))+'\n', args)
+
+        mapcube_local[i,j,:], errorcube_local[i,j,:] = po.fit_all_lines(args, logbook, wave, flam, i, j, nres=5, z=0., z_err=0.0001)
+        if not args.silent: print_mpi('Fitted cell '+str(k)+' i.e. cell '+str(i)+','+str(j)+' of '+str(ncells)+\
+        ' cells at: {:%Y-%m-%d %H:%M:%S}'.format(datetime.datetime.now()), args)
     comm.Barrier()
     comm.Allreduce(mapcube_local, properties.mapcube, op=MPI.SUM)
     comm.Allreduce(errorcube_local, properties.errorcube, op=MPI.SUM)
+   
     if rank ==0:
+        if args.debug:
+            po.myprint('Deb120: Trying to calculate some statistics on the cube of shape ('+str(np.shape(properties.mapcube)[0])+','+str(np.shape(properties.mapcube)[1])+','+str(np.shape(properties.mapcube)[2])+'), please wait...', args)
+            po.mydiag('Deb121: in ergs/s/pc^2: for mapcube',properties.mapcube, args)
+            po.myprint('Deb120: Trying to calculate some statistics on the cube of shape ('+str(np.shape(properties.errorcube)[0])+','+str(np.shape(properties.errorcube)[1])+','+str(np.shape(properties.errorcube)[2])+'), please wait...', args)
+            po.mydiag('Deb121: in ergs/s/pc^2: for mapcube',properties.errorcube, args)
         po.write_fits(logbook.fittedcube, properties.mapcube, args)        
         po.write_fits(logbook.fittederror, properties.errorcube, args)    
             
