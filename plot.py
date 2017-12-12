@@ -13,8 +13,8 @@ p.set_unit('particle_position_y','kpc')
 p.save()
 '''
 p = yt.ParticlePlot(ds, ('young_stars', 'particle_mass'), ('young_stars', 'age'))
-p.set_unit('particle_mass','Msun')
-p.set_unit('age','Myr')
+p.set_unit('particle_mass', 'Msun')
+p.set_unit('age', 'Myr')
 p.save()
 '''
 plt.scatter(x, y, c=m, s=2, edgecolors='none')

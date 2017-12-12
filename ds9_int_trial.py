@@ -53,7 +53,8 @@ import lsst.afw.math as afwMath
 try:
     needShow
 except NameError:
-    needShow = True                        # Used to avoid a bug in ds9 5.4
+    needShow = True  # Used to avoid a bug in ds9 5.4
+
 
 ## An error talking to ds9
 
@@ -61,12 +62,14 @@ except NameError:
 class Ds9Error(IOError):
     """Some problem talking to ds9"""
 
+
 try:
     _maskTransparency
 except NameError:
     _maskTransparency = None
 
-#-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+# -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
 
 def getXpaAccessPoint():
@@ -95,10 +98,12 @@ def ds9Version():
         print("Error reading version: %s" % e, file=sys.stderr)
         return "0.0.0"
 
+
 try:
     cmdBuffer
 except NameError:
-    XPA_SZ_LINE = 4096 - 100            # internal buffersize in xpa. Sigh; esp. as the 100 is some needed slop
+    XPA_SZ_LINE = 4096 - 100  # internal buffersize in xpa. Sigh; esp. as the 100 is some needed slop
+
 
     class Buffer(object):
         """Control buffering the sending of commands to ds9;
@@ -112,9 +117,9 @@ except NameError:
 
         def __init__(self, size=0):
             """Create a command buffer, with a maximum depth of size"""
-            self._commands = ""         # list of pending commands
+            self._commands = ""  # list of pending commands
             self._lenCommands = len(self._commands)
-            self._bufsize = []          # stack of bufsizes
+            self._bufsize = []  # stack of bufsizes
 
             self._bufsize.append(size)  # don't call self.size() as ds9Cmd isn't defined yet
 
@@ -124,15 +129,15 @@ except NameError:
                 size = XPA_SZ_LINE - 5
 
             if size > XPA_SZ_LINE:
-                print ("xpa silently hardcodes a limit of %d for buffer sizes (you asked for %d) " %
-                       (XPA_SZ_LINE, size), file=sys.stderr)
-                self.set(-1)            # use max buffersize
+                print("xpa silently hardcodes a limit of %d for buffer sizes (you asked for %d) " %
+                      (XPA_SZ_LINE, size), file=sys.stderr)
+                self.set(-1)  # use max buffersize
                 return
 
             if self._bufsize:
-                self._bufsize[-1] = size # change current value
+                self._bufsize[-1] = size  # change current value
             else:
-                self._bufsize.append(size) # there is no current value; set one
+                self._bufsize.append(size)  # there is no current value; set one
 
             self.flush(silent=silent)
 
@@ -158,6 +163,7 @@ except NameError:
             """Flush the pending commands"""
             ds9Cmd(flush=True, silent=silent)
 
+
     cmdBuffer = Buffer(0)
 
 
@@ -177,7 +183,7 @@ def ds9Cmd(cmd=None, trap=True, flush=False, silent=True, frame=None, get=False)
             return xpa.get(None, getXpaAccessPoint(), cmd, "").strip()
 
         # Work around xpa's habit of silently truncating long lines
-        if cmdBuffer._lenCommands + len(cmd) > XPA_SZ_LINE - 5: # 5 to handle newlines and such like
+        if cmdBuffer._lenCommands + len(cmd) > XPA_SZ_LINE - 5:  # 5 to handle newlines and such like
             ds9Cmd(flush=True, silent=silent)
 
         cmdBuffer._commands += ";" + cmd
@@ -209,7 +215,7 @@ def initDS9(execDs9=True):
     try:
         xpa.reset()
         ds9Cmd("iconify no; raise", False)
-        ds9Cmd("wcs wcsa", False)         # include the pixel coordinates WCS (WCSA)
+        ds9Cmd("wcs wcsa", False)  # include the pixel coordinates WCS (WCSA)
 
         v0, v1 = ds9Version().split('.')[0:2]
         global needShow
@@ -258,7 +264,8 @@ class Ds9Event(interface.Event):
     def __init__(self, k, x, y):
         interface.Event.__init__(self, k, x, y)
 
-#-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+# -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
 
 class DisplayImpl(virtualDevice.DisplayImpl):
@@ -316,20 +323,20 @@ class DisplayImpl(virtualDevice.DisplayImpl):
             maskPlanes = mask.getMaskPlaneDict()
             nMaskPlanes = max(maskPlanes.values()) + 1
 
-            planes = {}                      # build inverse dictionary
+            planes = {}  # build inverse dictionary
             for key in maskPlanes:
                 planes[maskPlanes[key]] = key
 
             planeList = range(nMaskPlanes)
             usedPlanes = long(afwMath.makeStatistics(mask, afwMath.SUM).getValue())
-            mask1 = mask.Factory(mask.getDimensions()) # Mask containing just one bitplane
+            mask1 = mask.Factory(mask.getDimensions())  # Mask containing just one bitplane
 
             colorGenerator = self.display.maskColorGenerator(omitBW=True)
             for p in planeList:
                 if planes.get(p):
                     pname = planes[p]
 
-                if not ((1 << p) & usedPlanes): # no pixels have this bitplane set
+                if not ((1 << p) & usedPlanes):  # no pixels have this bitplane set
                     continue
 
                 mask1[:] = mask
@@ -337,13 +344,14 @@ class DisplayImpl(virtualDevice.DisplayImpl):
 
                 color = self.display.getMaskPlaneColor(pname)
 
-                if not color:            # none was specified
+                if not color:  # none was specified
                     color = next(colorGenerator)
                 elif color.lower() == "ignore":
                     continue
 
                 ds9Cmd("mask color %s" % color)
                 _i_mtv(mask1, wcs, title, True)
+
     #
     # Graphics commands
     #
@@ -390,6 +398,7 @@ class DisplayImpl(virtualDevice.DisplayImpl):
             cmd += 'regions command {%s}; ' % region
 
         ds9Cmd(cmd)
+
     #
     # Set gray scale
     #
@@ -405,6 +414,7 @@ class DisplayImpl(virtualDevice.DisplayImpl):
                 print("ds9: ignoring scale unit %s" % unit)
 
             ds9Cmd("scale limits %g %g" % (min, max), frame=self.display.frame)
+
     #
     # Zoom and Pan
     #
@@ -421,7 +431,7 @@ class DisplayImpl(virtualDevice.DisplayImpl):
         """Pan frame to (colc, rowc)"""
 
         cmd = selectFrame(self.display.frame) + "; "
-        cmd += "pan to %g %g physical; " % (colc + 1, rowc + 1) # ds9 is 1-indexed. Grrr
+        cmd += "pan to %g %g physical; " % (colc + 1, rowc + 1)  # ds9 is 1-indexed. Grrr
 
         ds9Cmd(cmd, flush=True)
 
@@ -431,7 +441,7 @@ class DisplayImpl(virtualDevice.DisplayImpl):
         vals = ds9Cmd("imexam key coordinate", get=True).split()
         if vals[0] == "XPA$ERROR":
             if vals[1:4] == ['unknown', 'option', '"-state"']:
-                pass                    # a ds9 bug --- you get this by hitting TAB
+                pass  # a ds9 bug --- you get this by hitting TAB
             else:
                 print("Error return from imexam:", " ".join(vals), file=sys.stderr)
             return None
@@ -446,12 +456,13 @@ class DisplayImpl(virtualDevice.DisplayImpl):
 
         return Ds9Event(k, x, y)
 
-#-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+# -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
 try:
     haveGzip
 except NameError:
-    haveGzip = not os.system("gzip < /dev/null > /dev/null 2>&1") # does gzip work?
+    haveGzip = not os.system("gzip < /dev/null > /dev/null 2>&1")  # does gzip work?
 
 
 def _i_mtv(data, wcs, title, isMask):
@@ -493,6 +504,7 @@ def _i_mtv(data, wcs, title, isMask):
     except:
         pass
 
+
 if False:
     try:
         definedCallbacks
@@ -501,4 +513,5 @@ if False:
 
         for k in ('XPA$ERROR',):
             interface.setCallback(k)
-Contact GitHub 
+Contact
+GitHub

@@ -6,30 +6,35 @@ import math
 import matplotlib.pyplot as plt
 import subprocess
 import sys
+
 sys.argv = sys.argv[1:]
-#fn = sys.argv[1]
+# fn = sys.argv[1]
 for fn in sys.argv:
-    #print fn
-    ds=yt.load('/Users/acharyya/models/simulation_output/'+fn+'/'+fn.split()[0][0:6])
-    dd=ds.all_data()
+    # print fn
+    ds = yt.load('/Users/acharyya/models/simulation_output/' + fn + '/' + fn.split()[0][0:6])
+    dd = ds.all_data()
+
 
     def young_stars(pfilter, dd):
-        #filter = np.logical_and(np.logical_and(dd[pfilter.filtered_type, 'particle_type'] == 2, dd[pfilter.filtered_type, \
-        #'creation_time'] > 0), dd[pfilter.filtered_type, 'age'].in_units('Myr') <= 5)
-        filter = np.logical_and(dd[pfilter.filtered_type, 'creation_time'] > 0, dd[pfilter.filtered_type, 'age'].in_units\
-        ('Myr') <= 5)
-        return filter    
-    yt.add_particle_filter('young_stars', function=young_stars, filtered_type ='all', requires = ['age', \
-    'creation_time'])
+        # filter = np.logical_and(np.logical_and(dd[pfilter.filtered_type, 'particle_type'] == 2, dd[pfilter.filtered_type, \
+        # 'creation_time'] > 0), dd[pfilter.filtered_type, 'age'].in_units('Myr') <= 5)
+        filter = np.logical_and(dd[pfilter.filtered_type, 'creation_time'] > 0,
+                                dd[pfilter.filtered_type, 'age'].in_units \
+                                    ('Myr') <= 5)
+        return filter
+
+
+    yt.add_particle_filter('young_stars', function=young_stars, filtered_type='all', requires=['age', \
+                                                                                               'creation_time'])
     ds.add_particle_filter('young_stars')
-    print 'filtered, now extracting parameters...' ###
-    xg = dd['young_stars','particle_position_x']
-    
-    #x = xg.in_units('kpc')
-    yg = dd['young_stars','particle_position_y']
-    #y = yg.in_units('kpc')
-    zg = dd['young_stars','particle_position_z']
-    #z = zg.in_units('kpc')
+    print 'filtered, now extracting parameters...'  ###
+    xg = dd['young_stars', 'particle_position_x']
+
+    # x = xg.in_units('kpc')
+    yg = dd['young_stars', 'particle_position_y']
+    # y = yg.in_units('kpc')
+    zg = dd['young_stars', 'particle_position_z']
+    # z = zg.in_units('kpc')
     '''
     vz = dd['young_stars','particle_velocity_z']
     vz = vz.in_units('km/s')
@@ -55,4 +60,4 @@ for fn in sys.argv:
         fout.write(s)
     fout.close()
     '''
-    print 'Sorted formed young stars in '+fn+' ...\n'
+    print 'Sorted formed young stars in ' + fn + ' ...\n'
