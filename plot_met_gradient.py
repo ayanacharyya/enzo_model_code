@@ -218,7 +218,7 @@ for (row, logOHgrad_choice) in enumerate(logOHgrad_choice_arr):
     for (col, snr_cut_choice) in enumerate(snr_cut_choice_arr):
         master_table3 = master_table2[master_table2.snr_cut == snr_cut_choice]
         if not all_in_one_plot: title = title2 + '_snrcut=' + str(snr_cut_choice)
-        # --------------framing plot title and initialising 2 panel plot---------------------------------------------------
+        # --------------framing plot title and initialising 2 panel plot-----------------------------
 
         if all_in_one_plot:
             ax1 = fig.add_subplot(nrow, ncol, row * ncol + col + 1)
@@ -275,14 +275,14 @@ for (row, logOHgrad_choice) in enumerate(logOHgrad_choice_arr):
             ax1.errorbar(table2[xcol].values, y_arr, yerr=yerr, linestyle='None', c=col_ar[ind], alpha=a)
 
             if not all_in_one_plot and plot_intercept:
-                # -----------intercept plot: individual realisations------------------------------------------------------
+                # -----------intercept plot: individual realisations-----------------------------------
                 '''
                 y_arr = (table[ycol2].values  + logOHsun - table['logOHcen'].values)*100./(table['logOHcen'].values)
                 yerr = (table[ycol2+'_u'].values)*100./(table['logOHcen'].values)
                 ax2.scatter(table[xcol].values,y_arr, linewidth=0, c=col_ar[ind])
                 ax2.errorbar(table[xcol].values,y_arr,yerr=yerr, linestyle='None',c=col_ar[ind], alpha=a)
                 '''
-                # ----------intercept plot: median of all realisations-------------------------------------------------------
+                # ----------intercept plot: median of all realisations-------------------------------------
                 y_arr = (table2[ycol2].values + logOHsun - table2['logOHcen'].values) * 100. / (
                     table2['logOHcen'].values)
                 yerr = (table3[ycol2].values) * 100. / (table3['logOHcen'].values)
