@@ -9,15 +9,15 @@ import time
 start_time= time.time()
 
 multi = int(sys.argv[1])
-function = HOME+'models/enzo_model_code/plotobservables.py'
+function = HOME+'models/enzo_model_code/plotobservables2.py'
 snr_arr = np.arange(11)
 logOHcen = 8.77
 logOHgrad_arr = [-0.1,-0.05,-0.025,-0.01] #arg = logOHgrad
-scale_exptime_arr = [15000,30000] #exp time for arc=0.5, pivoting which the exp time for other arc values would be determined
+scale_exptime_arr = [240000,480000] #exp time for arc=0.5, pivoting which the exp time for other arc values would be determined
 file_arr = ['DD0600_lgf','DD0600']
 vres_arr = [90,70,50,30,20,10] #vres
 arc_arr = [0.5,1.,2.,3.,4.,5.,7.5,10.,12.5] #arg = res_arcsec
-outpath = '/avatar/acharyya/enzo_models/ppvcubes4/'
+outpath = '/avatar/acharyya/enzo_models2/ppvcubes4/'
 #fixed_SNR = 5.
 for file in file_arr:
     for scale_exptime in scale_exptime_arr:

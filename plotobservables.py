@@ -8,11 +8,9 @@ from astropy.io import ascii, fits
 import os
 HOME = os.getenv('HOME')
 import sys
-sys.path.append(HOME+'/Work/astro/mageproject/ayan/')
-sys.path.append(HOME+'/models/enzo_model_code/')
+sys.path.append(HOME+'/Work/astro/ayan_codes/mageproject/ayan/')
+sys.path.append(HOME+'/Work/astro/ayan_codes/enzo_model_code/')
 import splot_util as su
-import parallel_convolve as pc
-import parallel_fitting as pf
 from scipy.optimize import curve_fit, fminbound
 from scipy.integrate import quad
 from operator import itemgetter
@@ -27,6 +25,13 @@ import astropy.convolution as con
 import copy
 from astropy.stats import gaussian_fwhm_to_sigma as gf2s
 import re
+from scipy.special import erf
+import pandas as pd
+import scipy.interpolate as si
+from scipy import asarray as ar,exp
+from copy import deepcopy
+import scipy.ndimage as ndimage
+import string
 #------------Reading pre-defined line list-----------------------------
 def readlist():
     target = []
@@ -63,6 +68,14 @@ def title(fn):
         return 'High gas fraction (0.4): after 300Myr\n'
     else:
         return ''
+
+#--------------------to replace the group of digits after 'word's in a 'string' with 'repl'----------
+def repl_wildcard(string,words,repl='*'):
+    if not isinstance(words, list): words = [words]
+    for word in words:
+        string = string.split(word)[0]+word+re.sub(r'\d+',repl,string.split(word)[1],1)
+    return string
+
 #-------------------------------------------------------------------------------------------
 def plottheory():
     x = np.linspace(-1.3, -0.4, 1000)
@@ -71,12 +84,34 @@ def plottheory():
     plt.plot(x, Ke01(x), linestyle='dotted', label='Kewley 2001')
     plt.legend(bbox_to_anchor=(0.45, 0.23), bbox_transform=plt.gcf().transFigure)
 #-------------------------------------------------------------------------------------------------
+def get_erf(lambda_array, height, centre, width, delta_lambda):
+    return np.sqrt(np.pi/2) * height * width * ( erf((centre + delta_lambda/2 - lambda_array)/(np.sqrt(2)*width)) - \
+    erf((centre - delta_lambda/2 - lambda_array)/(np.sqrt(2)*width)) ) / delta_lambda #https://www.wolframalpha.com/input/?i=integrate+a*exp(-(x-b)%5E2%2F(2*c%5E2))*dx+from+(w-d%2F2)+to+(w%2Bd%2F2)
+#-------------------------------------------------------------------------------------------------
 def gauss(w, f, w0, f0, v, vz):
     w0 = w0*(1+vz/c) #shift central wavelength wrt w0 due to LOS vel v_z of HII region as compared to systemic velocity
     sigma = w0*v/c #c=3e5 km/s
-    g = (f0/np.sqrt(2*np.pi*sigma**2))*np.exp(-((w-w0)**2)/(2*sigma**2))    
+    A = f0/np.sqrt(2*np.pi*sigma**2) #height of Gaussian, such that area = f0
+    dw = w[np.where(w>=w0)[0][0]] - w[np.where(w>=w0)[0][0] - 1]
+    g = get_erf(w, A, w0, sigma, dw)
+    #g = A*np.exp(-((w-w0)**2)/(2*sigma**2))    
+    if args.oneHII is not None: print 'Debugging76: input gaussian parm (ergs/s/A/pc^2) =', f[0]/(args.res*1e3)**2, \
+    (f0/np.sqrt(2*np.pi*sigma**2))/(args.res*1e3)**2, w0, sigma #
     f += g
     return f
+#-------------------------------------------------------------------------------------------
+def fixcont_gaus(x,cont,n,*p):
+    result = cont
+    for xx in range(0,n):
+        result += p[3*xx+0]*exp(-((x-p[3*xx+1])**2)/(2*p[3*xx+2]**2))
+    return result
+#-------------------------------------------------------------------------------------------
+def fixcont_erf(x,cont,n,*p):
+    result = cont
+    for xx in range(0,n):
+        dw = x[np.where(x>=p[3*xx+1])[0][0]] - x[np.where(x>=p[3*xx+1])[0][0] - 1]
+        result += get_erf(x, p[3*xx+0], p[3*xx+1], p[3*xx+2], dw)
+    return result
 #-------------------------------------------------------------------------------------------
 def bpt_pixelwise(args, logbook, properties):
     global info
@@ -126,6 +161,13 @@ for Omega = '+str(args.Om)+', resolution = '+str(args.res)+' kpc'+info
     if args.saveplot:
         fig.savefig(path+t+'.png')
 
+#-------------------------------------------------------------------------------------------
+def iterable(item):
+    try:
+        iter(item)
+        return True
+    except:
+        return False
 #-------------------------------------------------------------------------------------------
 def meshplot2D(x,y):
     for i in range(0,np.shape(x)[0]):
@@ -203,19 +245,23 @@ def get_scale_length(args, logbook):
     ha_cum = np.cumsum(ha_list)/np.sum(ha_list)
     popt, pcov = curve_fit(func, d_list, ha_cum, p0 = [4,4], bounds = ([1,0.01], [7,8]))
     scale_length, alpha = popt
+    perc = .8
+    light_rad = d_list[np.where(ha_cum >= perc)[0][0]]
     if not args.hide:
         fig = plt.figure()
         plt.scatter(d_list, ha_cum, s=10, lw=0, c='b', label='pixels')
         plt.plot(d_list, func(d_list,*popt), c='r',label='Fit with scale length=%.2F kpc, pow=%.2F'%(scale_length, alpha))
+        plt.axvline(light_rad, c='k', linestyle='--', label=str(perc)+' percentile light radius')
+        plt.axhline(perc, c='k', linestyle='--')
         ylab = 'Cumulative Halpha luminosity'
     '''
-    ha_map = make2Dmap(logbook.s['H6562']/res**2, x, y, g, res)
+    ha_map = make2Dmap(logbook.s['H6562']/args.res**2, x, y, g, args.res)
     ha_map = np.ma.masked_where(ha_map<=0., ha_map)
-    b = np.linspace(-g/2 + 1,g/2,g)*(galsize)/g #in kpc
+    b = np.linspace(-g/2 + 1,g/2,g)*(args.galsize)/g #in kpc
     d = np.sqrt(b[:,None]**2+b**2)
     ha_list = np.log(ha_map.flatten())
     d_list = d.flatten()
-    x_arr = np.arange(0,galsize/2,0.1)
+    x_arr = np.arange(0,args.galsize/2,0.1)
     digitized = np.digitize(d_list, x_arr)    
     ha_list = [ha_list[digitized == i].mean() for i in range(1, len(x_arr))]
     d_list = [d_list[digitized == i].mean() for i in range(1, len(x_arr))]
@@ -224,173 +270,469 @@ def get_scale_length(args, logbook):
     ha_list = np.ma.compressed(ha_list)
     d_list = np.ma.compressed(d_list)            
     linefit = np.polyfit(d_list, ha_list, 1)
-    properties.scale_length = -1./linefit[0] #kpc
+    scale_length = -1./linefit[0] #kpc
     if not args.hide:
         fig = plt.figure()
         plt.scatter(d_list,ha_list, s=10, lw=0, c='b', label='pixels')
         plt.plot(x_arr, np.poly1d(linefit)(x_arr), c='r',label='Inferred Ha gradient')
         plt.axhline(-1+linefit[1], linestyle='--', c='k')
-        plt.axvline(properties.scale_length, linestyle='--', c='k', label='scale_length=%.2F kpc'%scale_length)
+        plt.axvline(scale_length, linestyle='--', c='k', label='scale_length=%.2F kpc'%scale_length)
         ylab = 'log Halpha surface brightness'
     '''
     if not args.hide:
         plt.xlabel('Galactocentric distance (kpc)')
         plt.ylabel(ylab)
-        plt.xlim(0,galsize/2)
+        plt.xlim(0,args.galsize/2)
         plt.legend(bbox_to_anchor=(0.9, 0.42), bbox_transform=plt.gcf().transFigure)
         plt.title('Measuring star formation scale length')
         plt.show(block=False)
     
-    output = 'Scale length from Halpha map = '+str(scale_length)+' kpc, in %.2F min\n'%((time.time()-start)/60.)
+    output = 'Scale length from Halpha map = '+str(scale_length)+' kpc, and '+str(perc*100)+' percentile light radius = '+str(light_rad)+', in %.2F min\n'%((time.time()-start)/60.)
     myprint(output, args)
     return scale_length
+#-------------From Dopita 2016------------------------------------------------------------------------------
+def get_D16_met(map_num_series, map_den_series, num_err=None, den_err=None):
+    mapn2 = map_num_series[0]
+    maps2, mapha = map_den_series[0], map_den_series[1]
+    logOHsol = 8.77 #log(O/H)+12 value used for Solar metallicity in MAPPINGS-V, Dopita 2016
+    log_ratio = np.log10(np.divide(mapn2,maps2)) + 0.264*np.log10(np.divide(mapn2,mapha))
+    logOHobj_map = log_ratio + 0.45*(log_ratio + 0.3)**5 # + 8.77
+    if num_err is not None:
+        mapn2_u = num_err[0]
+        maps2_u, mapha_u = den_err[0], den_err[1]
+        n2s2_u = np.sqrt((mapn2_u/maps2)**2 + (mapn2*maps2_u/maps2**2)**2)
+        n2ha_u = np.sqrt((mapn2_u/mapha)**2 + (mapn2*mapha_u/mapha**2)**2)
+        log_ratio_u = 0.434*(n2s2_u/np.divide(mapn2,maps2) + 0.264*n2ha_u/np.divide(mapn2,mapha))
+        logOHobj_map_u = log_ratio_u + 0.45*5*log_ratio_u*(log_ratio + 0.3)**4
+        return logOHsol, logOHobj_map, logOHobj_map_u
+    else:
+        return logOHsol, logOHobj_map
+    
+#-------------From Kewley 2002------------------------------------------------------------------------------
+def get_KD02_met(map_num_series, map_den_series, num_err=None, den_err=None):
+    mapn2 = map_num_series[0]
+    mapo2 = map_den_series[0]
+    logOHsol = 8.93 #log(O/H)+12 value used for Solar metallicity in earlier MAPPINGS in 2001
+    log_ratio = np.log10(np.divide(mapn2,mapo2))
+    logOHobj_map = np.log10(1.54020 + 1.26602*log_ratio + 0.167977*log_ratio**2) #+ 8.93
+    if num_err is not None:
+        mapn2_u = num_err[0]
+        mapo2_u = den_err[0]
+        n2o2_u = np.sqrt((mapn2_u/mapo2)**2 + (mapn2*mapo2_u/mapo2**2)**2)
+        log_ratio_u = 0.434*n2o2_u/np.divide(mapn2,mapo2)
+        logOHobj_map_u = 0.434*(1.26602*log_ratio_u + 0.167977*2*log_ratio*log_ratio_u)/(1.54020 + 1.26602*log_ratio + 0.167977*log_ratio**2)
+        return logOHsol, logOHobj_map, logOHobj_map_u
+    else:
+        return logOHsol, logOHobj_map
+
+#------------Function to emulate np.ma.sum(array,axis=0) but propagating masks------------
+def mysum(array, iserror=False):
+    pow = 2. if iserror else 1.    
+    r = np.zeros(np.shape(array[0]))
+    for ind in range(np.shape(array)[0]):
+        r = r + array[ind]**pow #uncertainties are added in quadrature
+    r = r**(1./pow)
+    return r
+
+#------------Function to measure SNR in a line map within certain annulus *dr* of scale length------------
+def get_snr_annulus(line, args, logbook, properties, dr=0.1):
+    map = properties.mapcube[:,:,np.where(logbook.llist == line)[0][0]]
+    map_u = properties.errorcube[:,:,np.where(logbook.llist == line)[0][0]]        
+    #map = np.ma.masked_where((map_u <= 0) | (map <= 0), map)
+    #map_u = np.ma.masked_where((map_u <= 0) | (map <= 0), map_u)
+    
+    snr_map = map/map_u
+    
+    map_list = get_pixels_within(map, args, logbook, annulus=True, dr=dr)
+    snr_list = get_pixels_within(snr_map, args, logbook, annulus=True, dr=dr)
+    snr_list = np.array([x for (y,x) in sorted(zip(map_list, snr_list), key=lambda pair: pair[0])])
+    map_list = np.sort(map_list)
+    
+    cumsum = np.cumsum(map_list)/np.sum(map_list)
+    ind = np.where(map_list >= np.percentile(map_list, 50.))[0][0]
+    ind2 = np.where(cumsum >= 0.5)[0][0]
+    '''
+    print np.shape(map_list), np.shape(snr_list), map_list, snr_list, cumsum #
+    print np.percentile(map_list, 50.), ind, map_list[ind], cumsum[ind], snr_list[ind] #
+    print map_list[ind2], ind2, map_list[ind2], cumsum[ind2], snr_list[ind2] #
+    '''    
+    result = [np.mean(snr_list)]
+    '''
+    result += [np.mean(map_list)/np.mean(get_pixels_within(map_u, args, logbook, annulus=True, dr=dr))]
+    result += [snr_list[ind]]
+    result += [snr_list[ind2]]
+    result += [np.mean([snr_list[np.where(map_list >= np.percentile(map_list, item))[0][0]] for item in np.linspace(50*0.9,50*1.1,10)])]
+    result += [np.percentile(get_pixels_within(snr_map, args, logbook), 100 - 90.)]
+    result += [10**(np.mean(np.log10(snr_list)))]
+    '''
+    if args.show_annulus:
+        plt.figure()
+        snr_list_hist = plt.hist(snr_list, histtype='step', bins=50, color='k', label='annulus')
+        hist, bins = np.histogram(snr_map[np.isfinite(snr_map)].flatten(), bins=np.linspace(-50,200,500))
+        bins = bins[:-1] + np.diff(bins) #to get bin centers
+        hist = np.array(hist) * np.max(snr_list_hist[0])/np.max(hist)
+        plt.step(bins, hist, color='r', label='entire FoV, scaled', alpha=0.5)
+        plt.axvline(linestyle='dotted', lw=1, c='b')
+        plt.xlim(np.min(snr_list_hist[1])-10, np.max(snr_list_hist[1])+10)
+        plt.title(str(line)+' map: SNR in +/- '+str(dr*100)+'% annulus of '+str(args.scale_length)+' kpc')
+        plt.xlabel('SNR')
+        plt.ylabel('Frequency')
+        plt.legend(loc='best')
+        plt.show(block=False)
+        bins = snr_list_hist[1][:-1] + np.diff(snr_list_hist[1])
+        result += [bins[np.argmax(snr_list_hist[0])]]
+        '''
+        plt.figure()
+        plt.plot(np.arange(len(cumsum)), cumsum, c='r')
+        plt.scatter(np.arange(len(cumsum)), cumsum, c='k', lw=0, s=5)
+        plt.title(str(line)+' map: cumuluative distrib of flux in +/- '+str(dr*100)+'% annulus of '+str(args.scale_length)+' kpc')
+        plt.xlabel('no. of pixels')
+        plt.ylabel('Sum')
+        plt.show(block=False)
+        '''
+    return result[:1]
+
+#------------metallicity profile (in log scale) to fit to (if using curve_fit)-------------------------------------------------------------------------------
+def met_profile(x, *p):
+    return p[0]*x + p[1]
+
+#---------returns weighted mean of 1d array, given 1sigma uncertainties--------------------------------------
+def wt_mean(data, uncert):
+    data, uncert = np.array(data), np.array(uncert)
+    pow = 2.
+    return np.sum(data/uncert**pow)/np.sum(1./uncert**pow), (1./np.sum(1./uncert**pow))**(1./pow)
+
+#------------function to bin data based on another array, in a weighted average way---------------------------
+def bin_data(array, data, bins, err=None):
+    bins_cen = bins[:-1] + np.diff(bins)/2.
+    indices = np.digitize(array, bins)
+    binned_data, binned_err = [], []
+    for i in range(1, len(bins)): #assuming all values in array are within limits of bin, hence last cell of binned_data=nan
+        thisdata = data[indices == i]
+        if err is not None:
+            thiserr = err[indices == i]
+            mean_data, mean_err = wt_mean(thisdata, thiserr)
+        else:
+            mean_data, mean_err = np.mean(thisdata), np.std(thisdata)
+        binned_data.append(mean_data)
+        binned_err.append(mean_err)
+    binned_data = np.array(binned_data)
+    binned_err = np.array(binned_err)
+    return bins_cen, binned_data, binned_err
+    
 #------------Function to measure metallicity-------------------------------------------------------------------------------
 def metallicity(args, logbook, properties):
     global info
-    mapn2 = properties.mapcube[:,:,np.where(logbook.llist == 'NII6584')[0][0]]
-    maps2a = properties.mapcube[:,:,np.where(logbook.llist == 'SII6717')[0][0]]
-    maps2b = properties.mapcube[:,:,np.where(logbook.llist == 'SII6730')[0][0]]
-    mapha = properties.mapcube[:,:,np.where(logbook.llist == 'H6562')[0][0]]
-    #mapo2 = properties.mapcube[:,:,np.where(logbook.llist == 'OII3727')[0][0]]
-    mapn2 = np.ma.masked_where(mapn2<=0., mapn2)
-    maps2a = np.ma.masked_where(maps2a<=0., maps2a)
-    maps2b = np.ma.masked_where(maps2b<=0., maps2b)
-    mapha = np.ma.masked_where(mapha<=0., mapha)
-    #mapo2 = np.ma.masked_where(mapo2<=0., mapo2)
-
-    if args.SNR_thresh is not None:
-        #loading all the flux uncertainties
-        mapn2_u = properties.errorcube[:,:,np.where(logbook.llist == 'NII6584')[0][0]]
-        maps2a_u = properties.errorcube[:,:,np.where(logbook.llist == 'SII6717')[0][0]]
-        maps2b_u = properties.errorcube[:,:,np.where(logbook.llist == 'SII6730')[0][0]]
-        mapha_u = properties.errorcube[:,:,np.where(logbook.llist == 'H6562')[0][0]]
-        #mapo2_u = errorcube[:,:,np.where(logbook.llist == 'OII3727')[0][0]]
-        mapn2_u = np.ma.masked_where(mapn2_u<=0., mapn2_u)
-        maps2a_u = np.ma.masked_where(maps2a_u<=0., maps2a_u)
-        maps2b_u = np.ma.masked_where(maps2b_u<=0., maps2b_u)
-        mapha_u = np.ma.masked_where(mapha_u<=0., mapha_u)
-        #mapo2_u = np.ma.masked_where(mapo2_u<=0., mapo2_u)        
-        #imposing SNR cut
-        mapn2 = np.ma.masked_where(mapn2/mapn2_u <args.SNR_thresh, mapn2)
-        maps2a = np.ma.masked_where(maps2a/maps2a_u <args.SNR_thresh, maps2a)
-        maps2b = np.ma.masked_where(maps2b/maps2b_u <args.SNR_thresh, maps2b)
-        mapha = np.ma.masked_where(mapha/mapha_u <args.SNR_thresh, mapha)
-        #mapo2 = np.ma.masked_where(mapo2/mapo2_u <args.SNR_thresh, mapo2)
-        if args.toscreen:
-            radius = 4. #kpc
-            print 'Fraction of non-zero cells above SNR_thresh= '+str(args.SNR_thresh)+' within radius= '+str(radius)+'kpc, \
-is %.2F, %.2F, %.2F and %.2F\n'%(get_valid_frac(mapn2, radius, args), get_valid_frac(maps2a, radius, args), \
-get_valid_frac(maps2b, radius, args), get_valid_frac(mapha, radius, args))
-        
     g = np.shape(properties.mapcube)[0]
     b = np.linspace(-g/2 + 1,g/2,g)*(args.galsize)/g #in kpc
-    d = np.sqrt(b[:,None]**2+b**2)
-    t = args.file+':Met_Om'+str(args.Om)+'_arc'+str(args.res_arcsec)+'"'+'_vres='+str(args.vres)+'kmps_'+info+args.gradtext
+    d = np.sqrt((b[:,None] - args.xcenter_offset)**2+(b - args.ycenter_offset)**2)
+    t = args.file+':Met_Om'+str(args.Om)
+    if args.smooth: t += '_arc'+str(args.res_arcsec)+'"'
+    if args.spec_smear: t+= '_vres='+str(args.vres)+'kmps_'
+    t += info+args.gradtext
     if args.SNR_thresh is not None: t += '_snr'+str(args.SNR_thresh)
+
+    nnum, nden = len(np.unique(args.num_arr)), len(np.unique(args.den_arr))
+    nplots = nnum + nden + len(args.num_arr) + 1
+    marker_arr = ['s', '^']
+    met_maxlim = 0.5
+    
+    if not args.inspect: nrow, ncol, figsize = 1,1, (8,6)
+    else: nrow, ncol, figsize = int(np.ceil(float(nplots/3))), min(nplots,3), (12,8)
+        
+    fig, axes = plt.subplots(nrow, ncol, sharex=True, figsize=figsize)
+    fig.subplots_adjust(hspace=0.1, wspace=0.25, top=0.9, bottom=0.1, left=0.07, right=0.98)
+
+    map_num, map_num_u, map_den, map_den_u = [],[],[],[]
+    plot_index, already_plotted = 0, []
+    
+    for num_grp in args.num_arr:
+        log_fluxmin, log_fluxmax = 0, -100
+        if args.inspect: ax = axes[plot_index/ncol][plot_index%ncol]
+        map_num_grp, map_num_grp_u = [],[]
+        if not iterable(num_grp): num_grp = [num_grp]
+        if num_grp not in already_plotted:
+            plot = True
+            already_plotted.append(num_grp)
+        else: plot=False
+        for (jj,num) in enumerate(num_grp):
+    
+            temp_u = properties.errorcube[:,:,np.where(logbook.llist == num)[0][0]]*(logbook.final_pix_size*1e3)**2
+            temp_u = np.ma.masked_where(temp_u<=0., temp_u)
+            map_num_grp_u.append(temp_u)
+    
+            temp = properties.mapcube[:,:,np.where(logbook.llist == num)[0][0]]*(logbook.final_pix_size*1e3)**2
+            temp = np.ma.masked_where(temp<=0., temp)
+            if args.SNR_thresh is not None: temp = np.ma.masked_where(temp/temp_u<args.SNR_thresh, temp)
+            if plot and args.inspect:
+                myprint('fitted: '+num+' max= '+str(np.max(temp))+', min= '+str(np.min(temp))+', integrated= '+str(np.sum(temp*(args.galsize*1000./g)**2)), args)
+                myprint('error: '+num+' max= '+str(np.max(temp_u))+', min= '+str(np.min(temp_u))+', integrated= '+str(np.sum(temp_u*(args.galsize*1000./g)**2)), args)
+                if not args.nomap: dummy = plotmap(temp, num+' map after fitting', 'Metallicity', 'log flux(ergs/s)', args, logbook, makelog=True)
+                ax.scatter(d.flatten(), np.log10(temp.flatten()), s=5, lw=0, marker=marker_arr[jj], c='b', label='pixel' if plot_index==1 else None)
+                if args.showerr: ax.errorbar(d.flatten(), np.log10(temp.flatten()), yerr=0.434*temp_u.flatten()/temp.flatten(), ls='None', c=col, fmt='', capsize=0, alpha=0.1) #for z=log(y), \delta z = 0.434*\delta y/y
+                if np.min(np.log10(np.ma.masked_where(temp<=0, temp))) < log_fluxmin: log_fluxmin = np.min(np.log10(np.ma.masked_where(temp<=0, temp))) #to set plot limits
+                if np.max(np.log10(temp)) > log_fluxmax: log_fluxmax = np.max(np.log10(temp)) #to set plot limits
+            map_num_grp.append(temp)
+        map_num.append(map_num_grp)
+        map_num_u.append(map_num_grp_u)
+        if plot and args.inspect:
+            ax.set_ylabel('log('+','.join(num_grp)+')')
+            if not args.inspect: ax.set_ylim(log_fluxmin, log_fluxmax)
+            plot_index += 1
+
+    for den_grp in args.den_arr:
+        log_fluxmin, log_fluxmax = 0, -100
+        if args.inspect: ax = axes[plot_index/ncol][plot_index%ncol]
+        map_den_grp, map_den_grp_u = [],[]
+        if not iterable(den_grp): den_grp = [den_grp]
+        if den_grp not in already_plotted:
+            plot = True
+            already_plotted.append(den_grp)
+        else: plot=False
+        for (jj,den) in enumerate(den_grp):
+    
+            temp_u = properties.errorcube[:,:,np.where(logbook.llist == den)[0][0]]*(logbook.final_pix_size*1e3)**2
+            temp_u = np.ma.masked_where(temp_u<=0., temp_u)
+            map_den_grp_u.append(temp_u)
+    
+            temp = properties.mapcube[:,:,np.where(logbook.llist == den)[0][0]]*(logbook.final_pix_size*1e3)**2
+            temp = np.ma.masked_where(temp<=0., temp)
+            if args.SNR_thresh is not None: temp = np.ma.masked_where(temp/temp_u<args.SNR_thresh, temp)
+            if plot and args.inspect:
+                myprint('fitted: '+den+' max= '+str(np.max(temp))+', min= '+str(np.min(temp))+', integrated= '+str(np.sum(temp*(args.galsize*1000./g)**2)), args)
+                myprint('error: '+den+' max= '+str(np.max(temp_u))+', min= '+str(np.min(temp_u))+', integrated= '+str(np.sum(temp_u*(args.galsize*1000./g)**2)), args)
+                if not args.nomap: dummy = plotmap(temp, den+' map after fitting', 'Metallicity', 'log flux(ergs/s)', args, logbook, makelog=True)
+                ax.scatter(d.flatten(), np.log10(temp.flatten()), s=5, lw=0, marker=marker_arr[jj], c='b', label='pixel' if plot_index==1 else None)
+                if args.showerr: ax.errorbar(d.flatten(), np.log10(temp.flatten()), yerr=0.434*temp_u.flatten()/temp.flatten(), ls='None', c=col, fmt='', capsize=0, alpha=0.1) #for z=log(y), \delta z = 0.434*\delta y/y
+                if np.min(np.log10(np.ma.masked_where(temp<=0, temp))) < log_fluxmin: log_fluxmin = np.min(np.log10(np.ma.masked_where(temp<=0, temp))) #to set plot limits
+                if np.max(np.log10(temp)) > log_fluxmax: log_fluxmax = np.max(np.log10(temp)) #to set plot limits
+            map_den_grp.append(temp)
+        map_den.append(map_den_grp)
+        map_den_u.append(map_den_grp_u)
+        if plot and args.inspect:
+            ax.set_ylabel('log('+','.join(den_grp)+')')
+            ax.set_ylim(log_fluxmin, log_fluxmax)
+            plot_index += 1
+
+    map_num_series = [mysum(map_num[ind]) for ind in range(len(args.num_arr))]        
+    map_num_u_series = [mysum(map_num_u[ind], iserror=True) for ind in range(len(args.num_arr))]        
+    map_den_series = [mysum(map_den[ind]) for ind in range(len(args.den_arr))]        
+    map_den_u_series = [mysum(map_den_u[ind], iserror=True) for ind in range(len(args.den_arr))]        
     
     if args.useKD:
-        #--------From Kewley 2002------------------
-        logOHsol = 8.93 #log(O/H)+12 value used for Solar metallicity in earlier MAPPINGS in 2001
-        log_ratio = np.log10(np.divide(mapn2,mapo2))
-        logOHobj_map = np.log10(1.54020 + 1.26602*log_ratio + 0.167977*log_ratio**2) #+ 8.93
-        myprint('log_ratio med, min '+str(np.median(log_ratio))+' '+str(np.min(log_ratio))+'\n', args)
-        myprint('logOHobj_map before conversion med, min '+str(np.median(logOHobj_map))+' '+str(np.min(logOHobj_map))+'\n', args)
+        logOHsol, logOHobj_map, logOHobj_map_u = get_KD02_met(map_num_series, map_den_series, num_err=map_num_u_series, den_err=map_den_u_series) #=log(O/H)_obj - log(O/H)_sun; in log units
         t += '_KD02'
     else:
-        #-------From Dopita 2016------------------------------
-        logOHsol = 8.77 #log(O/H)+12 value used for Solar metallicity in MAPPINGS-V, Dopita 2016
-        log_ratio = np.log10(np.divide(mapn2,np.add(maps2a,maps2b))) + 0.264*np.log10(np.divide(mapn2,mapha))
-        logOHobj_map = log_ratio + 0.45*(log_ratio + 0.3)**5 # + 8.77
-        myprint('log_ratio med, min '+str(np.median(log_ratio))+' '+str(np.min(log_ratio))+'\n', args)
-        myprint('logOHobj_map before conversion med, min '+str(np.median(logOHobj_map))+' '+str(np.min(logOHobj_map))+'\n', args)
+        logOHsol, logOHobj_map, logOHobj_map_u = get_D16_met(map_num_series, map_den_series, num_err=map_num_u_series, den_err=map_den_u_series) #=log(O/H)_obj - log(O/H)_sun; in log units
         t += '_D16'    
+    myprint('logOHobj_map before conversion med, min '+str(np.median(logOHobj_map))+' '+str(np.min(logOHobj_map))+'\n', args)
     #---------------------------------------------------
-    Z_map = 10**(logOHobj_map) #converting to Z (in units of Z_sol) from log(O/H) + 12
-    #Z_list = Z_map.flatten()
     Z_list =logOHobj_map.flatten()
+    myprint('Deb474: No. of masked pixels in Z_list = '+str(np.ma.count_masked(Z_list))+'\n', args) #
     myprint('Z_list after conversion med, mean, min '+str(np.median(Z_list))+' '+str(np.mean(Z_list))+' '+str(np.min(Z_list))+'\n', args)
-    '''
-    #--to print metallicity histogram: debugging purpose------
-    plt.hist(np.log10(Z_list), 100, range =(-1, 50)) #
-    plt.title('Z_map after conv') #
-    plt.xlabel('log Z/Z_sol') #
-    plt.yscale('log') #
-    '''
-    cbarlab = 'log(Z/Z_sol)'
-    if args.getmap:
-        map = plotmap(logOHobj_map, t, 'Metallicity', cbarlab, args, logbook, islog=False)
+    if args.noweight:
+        Z_u_list = np.zeros(len(Z_list)) + 1e-5 #artificially small uncertainty
     else:
-        if not args.hide:
-            if args.inspect: fig = plt.figure(figsize=(14,10))
-            else: fig = plt.figure(figsize=(8,6))
-            fig.subplots_adjust(hspace=0.7, top=0.85, bottom=0.1, left=0.1, right=0.95)
-            ax = plt.subplot(111)
-            plt.scatter(d.flatten(),Z_list, s=10, lw=0, c='b', label='pixels')
-            if args.inspect:
-                plt.scatter(d.flatten(),(np.divide(mapn2,np.add(maps2a,maps2b))).flatten(), s=10, lw=0, c='b', marker='s', label='pixels NII/SII')
-                plt.scatter(d.flatten(),(np.divide(mapn2,mapha)).flatten(), s=10, lw=0, c='b', marker='^', label='pixels NII/Ha')
-            #plt.axhline(10**(8.6-logOHsol),c='k',lw=0.5, label='trust') #line below which metallicity values should not be trusted for Kewley 2002 diag
-            plt.plot(np.arange(args.galsize/2), np.poly1d((args.logOHgrad, args.logOHcen))(np.arange(args.galsize/2)) - logOHsol,c='r', label='True gradient')
-            plt.axhline(0,c='k',linestyle='--',label='Zsol') #line for solar metallicity
-            plt.xlabel('Galactocentric distance (kpc)')
-            plt.ylabel(cbarlab)
-            plt.xlim(0,args.galsize/2)
-            plt.legend()
-            plt.title(t)
-            if args.inspect: plt.ylim(-1,3)
-            else: plt.ylim(-1,1)
-            if args.saveplot:
-                fig.savefig(path+t+'.png')
-        #---to compute apparent gradient and scatter---
-        if args.calcgradient:
-            myprint('Fitting gradient..'+'\n', args)
-            try:
-                d_list = np.ma.masked_array(d.flatten(), Z_list.mask)
-                Z_list = np.ma.compressed(Z_list)
-                d_list = np.ma.compressed(d_list)            
-                if len(Z_list) == 0: raise ValueError
-                linefit, linecov = np.polyfit(d_list, Z_list, 1, cov=True)
-                myprint('Fit paramters: '+str(linefit)+'\n', args)
-                myprint('Fit errors: '+str(linecov)+'\n', args)
-                properties.logOHgrad, properties.logOHcen = linefit
-                if not args.nowrite:
-                    gradfile = 'met_grad_log_paint'
-                    if args.scale_exptime: gradfile += '_exp'
-                    if args.fixed_SNR is not None: gradfile += '_fixedSNR'+str(args.fixed_SNR)
-                    gradfile += '.txt'
-                    if not os.path.exists(gradfile):
-                        head = '#File to store metallicity gradient information for different telescope parameters, as pandas dataframe\n\
+        Z_u_list =logOHobj_map_u.flatten()
+        myprint('Deb474: No. of masked pixels in Z_u_list = '+str(np.ma.count_masked(Z_u_list))+'\n', args) #
+        myprint('Z_u_list after conversion med, mean, min '+str(np.median(Z_u_list))+' '+str(np.mean(Z_u_list))+' '+str(np.min(Z_u_list))+'\n', args)
+
+    if not args.inspect:
+        choice = int(args.choice) if args.choice is not None else 0
+    
+        if choice == 0:
+            col = 'b' if not args.showbin else 'gray'
+        if choice == 1:
+            col_map = np.log10(np.inner(properties.ppvcube, properties.delta_lambda))
+            cbtitle = 'Summed up surface brightness (log ergs/s/pc^2)'
+        elif choice == 2:
+            col_map = np.log10(np.sum(properties.ppvcube, axis=2))
+            cbtitle = 'Summed up surface brightness (log ergs/s/A/pc^2)'
+        elif choice == 3:
+            col_map = np.log10(map_den_series[1]/(logbook.final_pix_size*1e3)**2) #Halpha
+            cbtitle = 'Ha surface brightness (log ergs/s/pc^2)'
+        elif choice == 4:
+            dummy,x,y = calcpos(logbook.s, args.galsize, args.res)
+            col_map = np.log10(make2Dmap(logbook.s['nII'], x, y, g, args.galsize/g, weights=10**logbook.s['logQ0']))
+            cbtitle = 'Luminosity weighted average H2R density of pixel (log cm^-3)'
+        elif choice == 5:
+            dummy,x,y = calcpos(logbook.s, args.galsize, args.res)
+            col_map = make2Dmap(logbook.s['age(MYr)'], x, y, g, args.galsize/g, weights=10**logbook.s['logQ0'])
+            cbtitle = 'Luminosity weighted average H2R age of pixel (Myr)'
+        elif choice == 6:
+            dummy,x,y = calcpos(logbook.s, args.galsize, args.res)
+            col_map = np.log10(make2Dmap(10**logbook.s['logQ0'], x, y, g, args.galsize/g))
+            cbtitle = 'Bolometric luminosity (log ergs/s)'
+        elif choice == 7:
+            dummy,x,y = calcpos(logbook.s, args.galsize, args.res)
+            fit = mapha # np.add(maps2a,maps2b) # 
+            lines = logbook.s['H6562'] #np.add(logbook.s['SII6717'],logbook.s['SII6730']) # 
+            true = make2Dmap(lines, x, y, g, args.galsize/g)/(logbook.final_pix_size*1e3)**2
+            mydiag('fitted SII map', fit, args)
+            mydiag('true SII map', true, args)
+            col_map = np.log10(np.abs(fit/true))
+            cbtitle = 'Inferred / True Ha SB (log ergs/s/pc^2)'
+
+        if choice: col = col_map.flatten()
+
+    else:
+        col = 'b' if not args.showbin else 'gray'
+
+    d = np.ma.masked_array(d, logOHobj_map.mask | logOHobj_map_u.mask)
+    if args.showcoord: coord_list = np.transpose(np.where(~d.mask))
+    d_list = d.flatten()
+    myprint('Deb474: No. of masked pixels in either Z_list or Z_u_list = '+str(np.ma.count_masked(d_list))+' out of total '+str(len(d_list))+' pixels.\n', args) #
+    d_list = np.ma.compressed(d_list)
+    Z_u_list = np.ma.masked_array(Z_u_list, Z_list.mask)
+    Z_list = np.ma.masked_array(Z_list, Z_u_list.mask)
+    if not isinstance(col, basestring):
+        col = np.ma.masked_array(col, Z_list.mask | Z_u_list.mask)
+        col = np.ma.compressed(col)
+    Z_u_list = np.ma.compressed(Z_u_list)
+    Z_list = np.ma.compressed(Z_list)
+    Z_list = np.array([x for (y,x) in sorted(zip(d_list,Z_list), key=lambda pair: pair[0])]) #sorting by distance
+    Z_u_list = np.array([x for (y,x) in sorted(zip(d_list,Z_u_list), key=lambda pair: pair[0])])
+    if args.showcoord: coord_list = np.array([x for (y,x) in sorted(zip(d_list,coord_list), key=lambda pair: pair[0])])
+    if not isinstance(col, basestring): col = np.array([x for (y,x) in sorted(zip(d_list,col), key=lambda pair: pair[0])])
+    d_list = np.sort(d_list)
+    if args.fitupto is not None: #to fit metallicity gradient only upto 'args.fitupto' x args.scale_length
+        Z_list = Z_list[d_list <= float(args.fitupto) * args.scale_length]
+        Z_u_list = Z_u_list[d_list <= float(args.fitupto) * args.scale_length]
+        if args.showcoord: coord_list = coord_list[d_list <= float(args.fitupto) * args.scale_length]
+        if not isinstance(col, basestring): col = col[d_list <= float(args.fitupto) * args.scale_length]
+        d_list = d_list[d_list <= float(args.fitupto) * args.scale_length]
+    
+    if not args.hide:
+        if args.inspect:
+            for ii in range(len(map_num_series)):
+                ax = axes[plot_index/ncol][plot_index%ncol]
+                ax.scatter(d.flatten(), np.divide(map_num_series[ii],map_den_series[ii]).flatten(), s=5, lw=0, marker=marker_arr[jj], c='b')
+                if args.showerr: ax.errorbar(d.flatten(), np.divide(map_num_series[ii],map_den_series[ii]).flatten(), yerr=np.sqrt((map_num_u_series[ii]/map_den_series[ii])**2 + (map_num_series[ii]*map_den_u_series[ii]/map_den_series[ii]**2)**2).flatten(), ls='None', c=col, fmt='', capsize=0, alpha=0.1) #for z=log(y), \delta z = 0.434*\delta y/y
+                ax.set_ylabel('+'.join(args.num_arr[ii])+'/'+'+'.join(args.den_arr[ii]))
+                ax.set_ylim(args.ratio_lim[ii])
+                plot_index += 1
+
+        ax = axes[plot_index/ncol][plot_index%ncol] if args.inspect else axes        
+        plot = ax.scatter(d_list,Z_list, s=5, lw=0, c=col, alpha=0.1 if args.showbin else 1)
+        if not isinstance(col, basestring): plt.colorbar(plot).set_label(cbtitle)
+
+        if args.showbin:
+            limit = args.galsize/2. if args.fitupto is None else float(args.fitupto)*args.scale_length
+            d_bin, Z_bin, Z_u_bin = bin_data(d_list, Z_list, np.linspace(0, limit, int(limit)+1), err=Z_u_list)
+            if args.fitbin:
+                linefit, linecov = np.polyfit(d_bin, Z_bin, 1, cov=True, w=1./Z_u_bin)
+                x_arr = np.arange(args.galsize/2)
+                ax.plot(x_arr, np.poly1d(linefit)(x_arr), c='b',label='Fit to bins')
+                plt.legend()
+            
+            ax.errorbar(d_bin, Z_bin, yerr=Z_u_bin, ls='None', c='b', fmt='o')
+
+        if args.showcoord:
+            for ind in range(len(d_list)):
+                ax.annotate('('+str(coord_list[ind][0])+','+str(coord_list[ind][1])+')', (d_list[ind]+0.1, Z_list[ind]-0.02), va='top', ha='center', color='k', fontsize=4, alpha=0.5)
+        if args.showerr: ax.errorbar(d_list,Z_list, yerr=Z_u_list, ls='None', c=col, capsize=0, fmt='', alpha=0.5)
+        
+        ax.set_ylabel('log(Z/Z_sun)')
+        if not args.inspect:
+            ax.set_xlim(0,args.galsize/2)
+            minor_ticks = np.arange(0, args.galsize/2, 0.2)
+            ax.set_xticks(minor_ticks, minor=True)
+            ax.set_xticks(np.arange(0,args.galsize/2,1))
+            fig.text(0.5, 0.03, 'Galactocentric distance (kpc)', ha='center')
+            fig.text(0.5,0.95, t, ha='center')
+            ax.text(0.08, met_maxlim-0.02, 'True slope= %.4F'%(args.logOHgrad), va='top', color='r', fontsize=10)
+            ax.text(0.08, met_maxlim-0.12, 'True interecept= %.4F'%(args.logOHcen-logOHsol), va='top', color='r', fontsize=10)
+        
+        ax.set_ylim(-2,met_maxlim)
+        minor_ticks = np.arange(-2, met_maxlim, 0.1)
+        ax.set_yticks(minor_ticks, minor=True)
+        ax.plot(np.arange(args.galsize/2), np.poly1d((args.logOHgrad, args.logOHcen))(np.arange(args.galsize/2)) - logOHsol,c='k' if args.inspect else 'r', label='True gradient slope='+str('%.4F'%args.logOHgrad))
+        ax.axhline(0,c='k',linestyle='--',label='Zsol') #line for solar metallicity
+        if args.saveplot:
+            fig.savefig(path+t+'.png')
+        if args.getmap: dummy = plotmap(logOHobj_map, t+'_fitted', 'Metallicity', 'log(Z/Z_sol)', args, logbook, makelog=False, addcircle_radius=args.scale_length)
+    #---to compute apparent gradient and scatter---
+    if args.calcgradient:
+        myprint('Fitting gradient..'+'\n', args)
+        myprint('Deb513: No. of pixels being considered for gradient fit = '+str(len(Z_list))+'\n', args)
+        if len(Z_list) <= 4: #no .of data points must exceed order+2 for covariance estimation; in our case order = deg+1 = 2
+            myprint('Not enough data points for vres= '+str(args.vres)+' above given SNR_thresh of '+str(args.SNR_thresh)+'\n.', args)
+        else:
+            '''
+            from lts_fits.lts_linefit import lts_linefit
+            p = lts_linefit(d_list, Z_list, np.zeros(len(d_list)), Z_u_list, pivot=np.median(d_list), text=True, plot=True)
+            linefit, linecov = [p.ab[1], p.ab[0]], [[p.ab_err[1]**2, 0.], [0., p.ab_err[0]**2]]
+            '''
+            linefit, linecov = np.polyfit(d_list, Z_list, 1, cov=True, w=1./Z_u_list)
+            #linefit, linecov =  curve_fit(met_profile, d_list, Z_list, p0=[-0.05, 0.], sigma=Z_u_list, absolute_sigma=True) #gives same result as np.polyfit
+            myprint('Fit paramters: '+str(linefit)+'\n', args)
+            myprint('Fit errors: '+str(linecov)+'\n', args)
+            properties.logOHgrad, properties.logOHcen = linefit
+            line, dr = 'NII6584', 0.1
+            snr_measured = get_snr_annulus(line, args, logbook, properties, dr=dr)
+            myprint('Measured mean SNR in '+line+' map within annulus of +/- '+str(dr*100)+'% of scale length ('\
+            +str(args.scale_length)+'kpc) with different methods = '+string.join([str('%.2F'%item) for item in snr_measured], ', ')+'\n', args)
+            snr_measured = snr_measured[0]
+            if not args.nowrite:
+                gradfile = 'met_grad_log_paint'
+                if args.scale_exptime: gradfile += '_exp_scaled'
+                if args.fixed_SNR is not None: gradfile += '_fixed_SNR'
+                if args.fixed_noise is not None: gradfile += '_fixed_noise'
+                if args.binto is not None: gradfile += '_binto'+str(args.binto)
+                if args.fitupto is not None: gradfile += '_fitupto'+str(args.fitupto)
+                gradfile += '.txt'
+                if not os.path.exists(gradfile):
+                    head = '#File to store metallicity gradient information for different telescope parameters, as pandas dataframe\n\
 #Columns are:\n\
 #simulation : name of simulation from which star particles were extracted\n\
 #res_arcsec : spatial resoltn of telescope\n\
 #vres : spectral resoltn of telescope\n\
 #pow, size : smoothing parameters, assuming Moffat profile\n\
-#SNR_thresh : SNR threshold applied before fitting the metallicity gradient, if any\n\
+#fixed_SNR : SNR applied before painting noise, if fixed_SNR mode (-99 if not fixed_SNR mode)\n\
+#fixed_noise : SNR applied before painting fixed noise, if fixed_noise mode (-99 if not fixed_noise mode)\n\
 #slope, intercept : fitted parameters\n\
-#scatter : RMS deviation = sqrt((sum of squared deviation from fit)/ number of data points)\n\
+#slope_u, intercept_u : uncertainty in above quantities\n\
+#exptime: exposure time (s); not relevant for fixed_SNR mode\n\
+#realisation : which random realisation\n\
+#snr_cut : snr_cut applied, if any (-99 if no cut applied)\n\
+#snr_measured : mean SNR of NII6584 line map measured at 0.9 - 1.1 x scale_radius\n\
 #by Ayan\n\
-simulation  res_arcsec   res_phys   vres        power   size    logOHcen        logOHgrad       SNR_thresh      slope       slope_u     \
-intercept       intercept_u       scale_exptime       realisation\n'
-                        open(gradfile,'w').write(head)
-                    with open(gradfile,'a') as fout:
-                        output = '\n'+args.file+'\t\t'+str(args.res_arcsec)+'\t\t'+str(logbook.final_pix_per_beam * \
-                        args.galsize/np.shape(properties.mapcube)[0])+'\t\t'+str(args.vres)+'\t\t'+str(args.parm[0])+'\t\t'+\
-                        str(args.parm[1])+'\t\t'+str(args.logOHcen)+'\t\t'+'\t\t'+str(args.logOHgrad)+'\t\t'+'\t\t'+\
-                        str(args.SNR_thresh)+'\t\t'+'\t\t'+str('%0.4F'%properties.logOHgrad)+'\t\t'+str('%0.4F'%np.sqrt(linecov[0][0]))+\
-                        '\t\t'+str('%0.4F'%properties.logOHcen)+'\t\t'+'\t\t'+str('%0.4F'%np.sqrt(linecov[1][1]))+'\t\t'+\
-                        '\t\t'+str(float(args.scale_exptime))+'\t\t'+'\t\t'+str(args.multi_realisation)
-                        fout.write(output)
-                    
-                x_arr = np.arange(0,10,0.1)
-                if not args.hide: plt.plot(x_arr, np.poly1d(linefit)(x_arr), c='b',label='Inferred gradient')
-            except (TypeError, IndexError, ValueError):
-                myprint('No data points for vres= '+str(args.vres)+' above given SNR_thresh of '+str(args.SNR_thresh)+'\n', args)
-                pass
-    return properties       
+simulation  res_arcsec   res_phys   vres        power   size    logOHcen        logOHgrad       fixed_SNR      fixed_noise      snr_measured     slope       slope_u     \
+intercept       intercept_u       exptime       snr_cut         realisation\n'
+                    open(gradfile,'w').write(head)
+                snr_cut_text = str(args.SNR_thresh) if args.SNR_thresh is not None else '-99'
+                fixed_SNR_text = str(args.fixed_SNR) if args.fixed_SNR is not None else '-99'
+                fixed_noise_text = str(args.fixed_noise) if args.fixed_noise is not None else '-99'
+                with open(gradfile,'a') as fout:
+                    output = '\n'+args.file+'\t\t'+str(args.res_arcsec)+'\t\t'+str(logbook.fwhm * \
+                    logbook.intermediate_pix_size)+'\t\t'+str(args.vres)+'\t\t'+str(args.pow)+'\t\t'+\
+                    str(args.size)+'\t\t'+str(args.logOHcen)+'\t\t'+'\t\t'+str(args.logOHgrad)+'\t\t'+'\t\t'+\
+                    fixed_SNR_text+'\t\t'+'\t\t'+fixed_noise_text+'\t\t'+'\t\t'+str('%.2F'%snr_measured)+'\t\t'+'\t\t'+str('%0.4F'%properties.logOHgrad)+'\t\t'+str('%0.4F'%np.sqrt(linecov[0][0]))+\
+                    '\t\t'+str('%0.4F'%properties.logOHcen)+'\t\t'+'\t\t'+str('%0.4F'%np.sqrt(linecov[1][1]))+'\t\t'+\
+                    '\t\t'+str(float(logbook.exptime))+'\t\t'+'\t\t'+snr_cut_text+'\t\t'+'\t\t'+str(args.multi_realisation)
+                    fout.write(output)
+                
+            x_arr = np.arange(args.galsize/2)
+            if not args.hide:
+                ax.plot(x_arr, np.poly1d(linefit)(x_arr), c='b',label='Inferred gradient slope='+str('%.4F'%properties.logOHgrad))
+                if not args.inspect:
+                    ax.text(0.08, met_maxlim-0.25, 'Inferred slope= %.4F +/- %.4F'%(properties.logOHgrad, np.sqrt(linecov[0][0])), va='top', color='k', fontsize=10)
+                    ax.text(0.08, met_maxlim-0.35, 'Inferred interecept= %.4F +/- %.4F'%(properties.logOHcen, np.sqrt(linecov[1][1])), va='top', color='k', fontsize=10)
+                
+    return properties, axes  
+#-------------Function to undo continuum normalisation (OR subtraction)------------
+def undo_contnorm(flux, cont, contsub=False):
+    if contsub: return flux + cont
+    else: return flux * cont
+
 #-------------Fucntion for fitting multiple lines----------------------------
-def fit_all_lines(args, logbook, wave, flam, pix_i, pix_j, nres=5, z=0, z_err=0.0001) :
+def fit_all_lines(args, logbook, wave, flam, flam_u, cont, pix_i, pix_j, z=0, z_err=0.0001) :
+    scaling = 1e-19 if args.contsub else 1. #to make "good" numbers that python can handle
+    flam /= scaling
+    flam_u /= scaling
+    cont /= scaling
     kk, count, flux_array, flux_error_array = 1, 0, [], []
-    ndlambda_left, ndlambda_right = [nres]*2 #how many delta-lambda wide will the window (for line fitting) be on either side of the central wavelength, default 5
+    ndlambda_left, ndlambda_right = [args.nres]*2 #how many delta-lambda wide will the window (for line fitting) be on either side of the central wavelength, default 5
     try:
         count = 1
         first, last = [logbook.wlist[0]]*2
@@ -407,29 +749,38 @@ def fit_all_lines(args, logbook, wave, flam, pix_i, pix_j, nres=5, z=0, z_err=0.
             rightlim = last*(1.+ndlambda_right/logbook.resoln)
             wave_short = wave[(leftlim < wave) & (wave < rightlim)]
             flam_short = flam[(leftlim < wave) & (wave < rightlim)]
-            #if args.debug: myprint('Trying to fit '+str(logbook.llist[kk-count:kk])+' line/s at once. Total '+str(count)+'\n', args)
+            flam_u_short = flam_u[(leftlim < wave) & (wave < rightlim)]
+            cont_short = cont[(leftlim < wave) & (wave < rightlim)]
+            if args.debug: myprint('Trying to fit '+str(logbook.llist[kk-count:kk])+' line/s at once. Total '+str(count)+'\n', args)
             try: 
-                popt, pcov = fitline(wave_short, flam_short, logbook.wlist[kk-count:kk], logbook.resoln, z=z, z_err=z_err)
-                if args.showplot:
+                popt, pcov = fitline(wave_short, flam_short, flam_u_short, logbook.wlist[kk-count:kk], logbook.resoln, z=z, z_err=z_err, contsub=args.contsub)
+                popt, pcov = np.array(popt), np.array(pcov)
+                level = 0. if args.contsub else 1.
+                popt = np.concatenate(([level], popt)) #for fitting after continuum normalised (OR subtracted), so continuum is fixed=1 (OR 0) and has to be inserted to popt[] by hand after fitting
+                pcov = np.hstack((np.zeros((np.shape(pcov)[0]+1,1)), np.vstack((np.zeros(np.shape(pcov)[1]),pcov)))) #for fitting after continuum normalised (OR subtracted), so error in continuum is fixed=0 and has to be inserted to pcov[] by hand after fitting
+                if args.showplot: #
                     plt.axvline(leftlim, linestyle='--',c='g')
                     plt.axvline(rightlim, linestyle='--',c='g')
-                ndlambda_left, ndlambda_right = [nres]*2
-                #if args.debug: myprint('Done this fitting!'+'\n', args)
+                    
+                ndlambda_left, ndlambda_right = [args.nres]*2
+                if args.debug: myprint('Done this fitting!'+'\n', args)
+            
             except TypeError, er:
                 if args.debug: myprint('Trying to re-do this fit with broadened wavelength window..\n', args)
                 ndlambda_left+=1
                 ndlambda_right+=1
                 continue
             except (RuntimeError, ValueError), e:
-                popt = np.zeros(count*3 + 1) #if could not fit the line/s fill popt with zeros so flux_array gets zeros
+                level = 0. if args.contsub else 1.
+                popt = np.concatenate(([level],np.zeros(count*3))) #if could not fit the line/s fill popt with zeros so flux_array gets zeros
                 pcov = np.zeros((count*3 + 1,count*3 + 1)) #if could not fit the line/s fill popt with zeros so flux_array gets zeros
-                myprint('Could not fit lines '+str(logbook.llist[kk-count:kk])+' for pixel '+str(pix_i)+', '+str(pix_j)+'\n', args)
+                if args.debug: myprint('Could not fit lines '+str(logbook.llist[kk-count:kk])+' for pixel '+str(pix_i)+', '+str(pix_j)+'\n', args)
                 pass
-                
+            
             for xx in range(0,count):
-                #in popt for every bunch of lines, element 0 is the continuum(a)
-                #and elements (1,2,3) or (4,5,6) etc. are the height(b), mean(c) and width(d)
-                #so, for each line the elements (0,1,2,3) or (0,4,5,6) etc. make the full suite of (a,b,c,d) gaussian parameters
+                #in popt for every bunch of lines,
+                #elements (0,1,2) or (3,4,5) etc. are the height(b), mean(c) and width(d)
+                #so, for each line the elements (cont=a,0,1,2) or (cont=a,3,4,5) etc. make the full suite of (a,b,c,d) gaussian parameters
                 #so, for each line, flux f (area under gaussian) = sqrt(2pi)*(b-a)*d
                 #also the full covariance matrix pcov looks like:
                 #|00 01 02 03 04 05 06 .....|
@@ -455,22 +806,29 @@ def fit_all_lines(args, logbook, wave, flam, pix_i, pix_j, nres=5, z=0, z_err=0.
                 #var_f = 6^2(00 + 44) + (4-0)^2*66 - (2)*6^2*40 + (2)*6*(4-0)*(46-06),
                 #var_f = 9^2(00 + 77) + (1-0)^2*99 - (2)*9^2*70 + (2)*9*(7-0)*(79-09), etc.
                 #
-                popt_single= np.concatenate(([popt[0]],popt[3*xx+1:3*(xx+1)+1]))               
-                flux = np.sqrt(2*np.pi)*(popt_single[1] - popt_single[0])*popt_single[3] #total flux = integral of guassian fit ; resulting flux in ergs/s/pc^2 units
+                popt_single= np.concatenate(([popt[0]],popt[3*xx+1:3*(xx+1)+1]))
+                cont_at_line = cont[np.where(wave >= logbook.wlist[kk+xx-count])[0][0]]
+                if args.oneHII is not None: print 'Debugging534: linefit param at (',pix_i,',',pix_j,') for ',logbook.llist[kk+xx-count],'(ergs/s/pc^2/A) =',popt_single #
+                flux = np.sqrt(2*np.pi)*(popt_single[1] - popt_single[0])*popt_single[3]*scaling #total flux = integral of guassian fit ; resulting flux in ergs/s/pc^2 units
+                if not args.contsub: flux *= cont_at_line #if continuum is normalised (and NOT subtracted) then need to change back to physical units by multiplying continuum at that wavelength
+                if args.oneHII is not None: print 'Debugging536: lineflux at (',pix_i,',',pix_j,') for ',logbook.llist[kk+xx-count],'(ergs/s/pc^2/A) =',flux #                
                 flux_array.append(flux)
                 flux_error = np.sqrt(2*np.pi*(popt_single[3]**2*(pcov[0][0] + pcov[3*xx+1][3*xx+1])\
                 + (popt_single[1]-popt_single[0])**2*pcov[3*(xx+1)][3*(xx+1)]\
                 - 2*popt_single[3]**2*pcov[3*xx+1][0]\
                 + 2*(popt_single[1] - popt_single[0])*popt_single[3]*(pcov[3*xx+1][3*(xx+1)] - pcov[0][3*(xx+1)])\
-                )) # var_f = 3^2(00 + 11) + (1-0)^2*33 - (2)*3^2*10 + (2)*3*(1-0)*(13-03)
+                ))*scaling # var_f = 3^2(00 + 11) + (1-0)^2*33 - (2)*3^2*10 + (2)*3*(1-0)*(13-03)
+                if not args.contsub: flux_error *= cont_at_line #if continuum is normalised (and NOT subtracted) then need to change back to physical units by multiplying continuum at that wavelength
                 flux_error_array.append(flux_error)
                 if args.showplot:
-                    leftlim = popt_single[2]*(1.-nres/logbook.resoln) 
-                    rightlim = popt_single[2]*(1.+nres/logbook.resoln)
+                    leftlim = popt_single[2]*(1.-args.nres/logbook.resoln) 
+                    rightlim = popt_single[2]*(1.+args.nres/logbook.resoln)
                     wave_short_single = wave[(leftlim < wave) & (wave < rightlim)]
-                    plt.plot(wave_short_single, np.log10(su.gaus(wave_short_single,1, *popt_single)),lw=1, c='r')
+                    cont_short_single = cont[(leftlim < wave) & (wave < rightlim)]
+                    plt.plot(wave_short_single, su.gaus(wave_short_single,1, *popt_single)*scaling, lw=1, c='r')
+                    #plt.scatter(wave_short_single, su.gaus(wave_short_single,1, *popt_single)*cont_short_single,lw=0, c='r', s=10)
             if args.showplot:
-                if count >1: plt.plot(wave_short, np.log10(su.gaus(wave_short, count, *popt)),lw=2, c='g')                   
+                if count >1: plt.plot(wave_short, undo_contnorm(su.gaus(wave_short, count, *popt),cont_short, contsub=args.contsub),lw=2, c='g')                   
                 plt.draw()
                         
             first, last = [center2]*2
@@ -482,29 +840,64 @@ def fit_all_lines(args, logbook, wave, flam, pix_i, pix_j, nres=5, z=0, z_err=0.
     #-------------------------------------------------------------------------------------------
     flux_array = np.array(flux_array)
     flux_error_array = np.array(flux_error_array)
-    flux_array[flux_array<1.] = 0. #filtering out obvious non-detections and setting those fluxes to 0
     return flux_array, flux_error_array
 #-------------------------------------------------------------------------------------------
-def fitline(wave, flam, wtofit, resoln, z=0, z_err=0.0001):
+def fitline(wave, flam, flam_u, wtofit, resoln, z=0, z_err=0.0001, contsub=False):
     v_maxwidth = 10*c/resoln #10*vres in km/s
     z_allow = 3*z_err #wavelengths are at restframe; assumed error in redshift
-    p_init, lbound, ubound = [np.abs(flam[0])],[0.],[np.inf]
+    p_init, lbound, ubound = [],[],[]
     for xx in range(0, len(wtofit)):
         fl = np.max(flam) #flam[(np.abs(wave - wtofit[xx])).argmin()] #flam[np.where(wave <= wtofit[xx])[0][0]]
         p_init = np.append(p_init, [fl-flam[0], wtofit[xx], wtofit[xx]*2.*gf2s/resoln])
         lbound = np.append(lbound,[0., wtofit[xx]*(1.-z_allow/(1.+z)), wtofit[xx]*1.*gf2s/resoln])
         ubound = np.append(ubound,[np.inf, wtofit[xx]*(1.+z_allow/(1.+z)), wtofit[xx]*v_maxwidth*gf2s/c])
-    popt, pcov = curve_fit(lambda x, *p: su.gaus(x, len(wtofit), *p),wave,flam,p0= p_init, max_nfev=10000, bounds = (lbound, ubound))
+    level = 0. if contsub else 1.
+    if flam_u.any():
+        #popt, pcov = curve_fit(lambda x, *p: fixcont_erf(x, level, len(wtofit), *p),wave,flam,p0= p_init, max_nfev=10000, bounds = (lbound, ubound))
+        popt, pcov = curve_fit(lambda x, *p: fixcont_erf(x, level, len(wtofit), *p),wave,flam,p0= p_init, maxfev=10000, bounds = (lbound, ubound), sigma=flam_u, absolute_sigma=True)
+    else:
+        popt, pcov = curve_fit(lambda x, *p: fixcont_erf(x, level, len(wtofit), *p),wave,flam,p0= p_init, max_nfev=10000, bounds = (lbound, ubound))
+    '''         
+    plt.figure() #
+    plt.plot(wave, flam, c='k', label='flam') #
+    plt.plot(wave, flam_u, c='gray', label='flam_u') #
+    #plt.plot(wave, cont_short, c='g', label='cont') #
+    plt.plot(wave, fixcont_erf(wave, level, len(wtofit), *popt), c='r', label='fit') #
+    plt.plot(wave, fixcont_erf(wave, level, len(wtofit), *p_init), c='b', label='init guess') #
+    plt.ylim(-0.2e-18, 1.2e-18) #
+    plt.legend() #
+    '''
     return popt, pcov
 #-------------------------------------------------------------------------------------------
 def emissionmap(args, logbook, properties):
     map = properties.mapcube[:,:,np.where(logbook.llist == args.line)[0][0]]
-    map = np.ma.masked_where(map<0., map)
-    if args.SNR_thresh is not None:
-        map_u = properties.errorcube[:,:,np.where(logbook.llist == args.line)[0][0]]        
-        map = np.ma.masked_where(map/map_u <args.SNR_thresh, map)
+    map_u = properties.errorcube[:,:,np.where(logbook.llist == args.line)[0][0]]        
+    if args.SNR_thresh is not None: map = np.ma.masked_where(map/map_u <args.SNR_thresh, map)
     t = args.line+'_map:\n'+logbook.fitsname
-    map = plotmap(map, t, args.line, 'Log '+args.line+' surface brightness in erg/s/pc^2', args, logbook)
+    dummy = plotmap(map, t, args.line, 'Log '+args.line+' surface brightness in erg/s/pc^2', args, logbook, addcircle_radius=args.scale_length)                                
+
+    if args.snrmap:
+        snr_map = map/map_u
+        mydiag('SNR map', snr_map, args)
+        percentile, dr = 90, 0.1
+        snr_frac = np.percentile(get_pixels_within(snr_map, args, logbook), 100 - percentile)
+        myprint(str(percentile)+'% of pixels within '+str(args.scale_length)+'kpc have SNR >= '+str(snr_frac), args)
+        snr_measured = np.mean(get_pixels_within(snr_map, args, logbook, annulus=True, dr=dr))
+        myprint('Measured mean SNR in '+args.line+' map within annulus of +/- '+str(dr*100)+'% of scale length ('\
++str(args.scale_length)+'kpc) = '+str('%.2F'%snr_measured)+'\n', args)
+        if args.snrhist:
+            plt.figure()
+            if args.cmin is not None: snr_map = np.ma.masked_where(np.log10(map)<args.cmin, snr_map)
+            if args.cmax is not None: snr_map = np.ma.masked_where(np.log10(map)>args.cmax, snr_map)
+            plt.hist(np.ma.compressed(snr_map.flatten()),bins=100,range=(0,1000))
+        #dummy = plotmap(snr_map, args.line+' SNR map', 'junk', 'log(SNR)', args, logbook, makelog=True, addcircle_radius=args.scale_length, issnrmap=True)
+        dummy = plotmap(snr_map, args.line+' SNR map', 'junk', 'SNR', args, logbook, makelog=False, addcircle_radius=args.scale_length, issnrmap=True)
+
+    dr = 0.1
+    snr_measured = get_snr_annulus(args.line, args, logbook, properties, dr=dr)
+    myprint('Measured mean SNR in '+args.line+' map within annulus of +/- '+str(dr*100)+'% of scale length ('\
+    +str(args.scale_length)+'kpc) with different methods = '+string.join([str('%.2F'%item) for item in snr_measured], ', ')+'\n', args)
+
     return map
 #-------------------------------------------------------------------------------------------
 def SFRmaps(args, logbook, properties):
@@ -528,7 +921,7 @@ def SFRmaps(args, logbook, properties):
     #SFRmap_real /= agemap #dividing by mean age in the box
     SFRmap_real /= 5e6 #dividing by straight 5M years
     SFRmap_real[np.isnan(SFRmap_real)]=0
-    SFRmap_real = rebin_old(SFRmap_real,np.shape(SFRmapHa))
+    SFRmap_real = rebin(SFRmap_real,np.shape(SFRmapHa))
     SFRmap_real = np.ma.masked_where(SFRmap_real<=0., SFRmap_real)
     SFRmapHa *= (const/1.37e-12) #Msun/yr/pc^2
     
@@ -537,7 +930,7 @@ def SFRmaps(args, logbook, properties):
         #SFRmapQ0 = plotmap(SFRmapQ0, t, 'SFRmapQ0', 'Log SFR(Q0) density in Msun/yr/pc^2', args, logbook)
         SFRmap_real = plotmap(SFRmap_real, t, 'SFRmap_real', 'Log SFR(real) density in Msun/yr/pc^2', args, logbook)
         SFRmapHa = plotmap(SFRmapHa, t, 'SFRmapHa', 'Log SFR(Ha) density in Msun/yr/pc^2', galsize, args, logbook)
-        #SFRmap_comp = plotmap(SFRmap_comp, t, 'Log SFR(Q0)/SFR(real) in Msun/yr/pc^2', args, logbook, islog=False)   
+        #SFRmap_comp = plotmap(SFRmap_comp, t, 'Log SFR(Q0)/SFR(real) in Msun/yr/pc^2', args, logbook, makelog=False)   
     else:
         fig = plt.figure(figsize=(8,6))
         fig.subplots_adjust(hspace=0.7, top=0.9, bottom=0.1, left=0.1, right=0.95)
@@ -613,7 +1006,7 @@ def plotintegmap(args, logbook, properties):
     return dummy
 #-------------------------------------------------------------------------------------------
 def spec_total(w, ppv, thistitle, args, logbook):
-    cbarlab = 'Log surface brightness in erg/s/pc^2' #label of color bar
+    cbarlab = 'Surface brightness in erg/s/pc^2' #label of color bar
     fig = plt.figure(figsize=(14,6))
     fig.subplots_adjust(hspace=0.7, top=0.85, bottom=0.1, left=0.1, right=0.95)
     ax = plt.subplot(111)
@@ -621,7 +1014,7 @@ def spec_total(w, ppv, thistitle, args, logbook):
         plt.axvline(i,ymin=0.9,c='black')    
 
     #-------------------------------------------------------------------------------------------
-    y = np.log10(np.sum(ppv,axis=(0,1)))
+    y = np.sum(ppv,axis=(0,1))
     plt.plot(w, y,lw=1)
     t = thistitle+', for '+title(args.file)+' Nebular+ stellar for Om = '+str(args.Om)+', res = '+str(logbook.final_pix_size)+' kpc' + info
     #-------------------------------------------------------------------------------------------
@@ -634,7 +1027,23 @@ def spec_total(w, ppv, thistitle, args, logbook):
     if args.saveplot:
         fig.savefig(args.path+t+'.png')
     if args.debug: plt.show(block=False)
-#-------------------------------------------------------------------------------------------
+#-----------to get the sky normalization from skynoise provided by Rob--------------------------------------------------------------------------------
+def get_sky_norm(properties, logbook):
+    skynoise = properties.skynoise #properties.skynoise in units of electrons/s/spaxel;
+                                   #had been derived by multiplying th noise*delta_lambda in getskynoise()so it is already kind of in units of noise*dlambda, just need to integrate it now
+    wave = properties.dispsol
+    
+    lambda_NII = logbook.wlist[logbook.llist=='NII6584'][0]
+    sky_norm = skynoise[np.where(wave >= lambda_NII)[0][0]]/properties.delta_lambda[np.where(wave >= lambda_NII)[0][0]] #since skynoise was already in units of noise*dlambda
+    '''
+    R_band_range = [5500., 8000.] #Angstrom
+    skynoise_Rband = skynoise[(wave>=R_band_range[0]) & (wave<=R_band_range[1])]
+    sky_norm = np.sum(skynoise_Rband) #since it is already in units of noise*dlambda, just adding = integration
+    sky_norm /= np.diff(R_band_range)[0] #to divide by wavelength range, to bring sky_norm to units of el/s/spaxel/A
+    '''
+    return sky_norm
+
+#-------------to get the dispersion solution------------------------------------------------------------------------------
 def get_disp_array(args, logbook, properties):
     sig = 5*args.vdel/c 
     w = np.linspace(logbook.wmin, logbook.wmax, args.nbin)
@@ -642,8 +1051,8 @@ def get_disp_array(args, logbook, properties):
         w1 = ii*(1-sig)
         w2 = ii*(1+sig)
         highres = np.linspace(w1, w2, args.nhr)
-        w = np.insert(w, np.where(np.array(w)<w2)[0][-1]+1, highres)
-    properties.w = np.sort(w)
+        w = np.hstack((w[:np.where(w<w1)[0][-1]+1], highres, w[np.where(w>w2)[0][0]:]))
+    properties.w = w
     #-------------------------------------------------------------------------------------------
     if args.spec_smear:        
         properties.new_w = [properties.w[0]]
@@ -653,7 +1062,8 @@ def get_disp_array(args, logbook, properties):
     
     properties.dispsol = np.array(properties.new_w[1:]) if args.spec_smear else np.array(properties.w)
     properties.nwbin = len(properties.dispsol)
-    
+    properties.delta_lambda = np.array([properties.dispsol[1]-properties.dispsol[0]]+[(properties.dispsol[i+1]-properties.dispsol[i-1])/2 for i in range(1,len(properties.dispsol)-1)]+[properties.dispsol[-1]-properties.dispsol[-2]]) #wavelength spacing for each wavecell; in Angstrom     
+
     if args.debug: myprint('Deb663: for vres= '+str(args.vres)+', length of dispsol= '+str(len(properties.dispsol))+'\n', args)
     return properties
 #-------------------------------------------------------------------------------------------
@@ -662,22 +1072,29 @@ def spec(args, logbook, properties):
     properties = get_disp_array(args, logbook, properties)
     if os.path.exists(logbook.H2R_filename):
         ppv = fits.open(logbook.H2R_filename)[0].data
-        if not args.silent: myprint('Reading existing H2R file cube from '+logbook.H2R_filename+'\n', args)
+        myprint('Reading existing H2R file cube from '+logbook.H2R_filename+'\n', args)
     else:
         #-------------------------------------------------------------------------------------------
         g,x,y = calcpos(logbook.s, args.galsize, args.res)
         ppv = np.zeros((g,g,properties.nwbin))
         funcar = readSB(logbook.wmin, logbook.wmax)
-        #-------------------------------------------------------------------------------------------    
-        for j in range(len(logbook.s)):
-            myprint('Particle '+str(j+1)+' of '+str(len(logbook.s))+'\n', args)
+        #-------------------------------------------------------------------------------------------            
+        if args.oneHII is not None:
+            print 'Debugging750: Mappings fluxes (ergs/s/pc^2) for H2R #',args.oneHII,'=', np.array([logbook.s[line][args.oneHII] for line in ['H6562','NII6584','SII6717','SII6730']])/(args.res*1e3)**2
+            startHII, endHII = args.oneHII, args.oneHII + 1
+        else:
+            startHII, endHII = 0, len(logbook.s)
+
+        for j in range(startHII, endHII):
+            myprint('Particle '+str(j+1)+' of '+str(endHII - startHII)+'\n', args)
             vz = float(logbook.s['vz'][j])
             a = int(round(logbook.s['age(MYr)'][j]))
             f = np.multiply(funcar[a](properties.w),(300./1e6)) #to scale the continuum by 300Msun, as the ones produced by SB99 was for 1M Msun
                                                                 #the continuum is in ergs/s/A
+
             if args.debug and j==0:
                 fig = plt.figure(figsize=(14,6))
-                plt.plot(properties.w, np.log10(f), label='cont')
+                plt.plot(properties.w, f, label='cont')
                 plt.xlim(logbook.wmin, logbook.wmax)
                 plt.xlabel('Wavelength (A)')
                 plt.ylabel('flam (ergs/s/A)')
@@ -686,337 +1103,885 @@ def spec(args, logbook, properties):
             for l in logbook.llist:
                 try: flist.append(logbook.s[l][j]) #ergs/s
                 except: continue
-            flist = np.multiply(np.array(flist), const) #to multiply with nebular flux to make it comparable with SB continuum
-        
+            
             for i, fli in enumerate(flist):
                 f = gauss(properties.w, f, logbook.wlist[i], fli, args.vdisp, vz) #adding every line flux on top of continuum; gaussians are in ergs/s/A
             
-            if args.debug and j==0: plt.plot(properties.w, np.log10(f), label='cont + lines')
+            if args.debug and j==0: plt.plot(properties.w, f, label='cont + lines')
             
-            if args.spec_smear: f = [f[properties.bin_index == ii].mean() for ii in range(1, properties.nwbin + 1)] #spectral smearing/rebinning of spctrum
+            if args.spec_smear:
+                f = np.array([f[properties.bin_index == ii].mean() for ii in range(1, properties.nwbin + 1)]) #spectral smearing i.e. rebinning of spectrum                                                                                                                             #mean() is used here to conserve flux; as f is in units of ergs/s/A, we want integral of f*dlambda to be preserved (same before and after resampling)
+                                                                                                                #this can be checked as np.sum(f[1:]*np.diff(wavelength_array))
             
             if args.debug and j==0:
-                plt.plot(properties.dispsol, np.log10(f), label='cont+lines+smeared:vres= '+str(args.vres))
+                if args.spec_smear: plt.plot(properties.dispsol, f, label='cont+lines+smeared:vres= '+str(args.vres))
                 plt.legend()
                 plt.show(block=False)
             
-            ppv[int(x[j]/args.res)][int(y[j]/args.res)][:] += f #f is ergs/s/A, ppv becomes ergs/s/A/pixel
+            f *=  properties.flux_ratio #converting from emitted flux to flux actually entering each pixel
+            ppv[int(x[j]/args.res)][int(y[j]/args.res)][:] += f  #f is ergs/s/A, ppv becomes ergs/s/A/pixel
         #-------------------------------------------------------------------------------------------
-        if not args.silent: myprint('Done reading in all HII regions in '+str((time.time() - start_time)/60)+' minutes.\n', args)
+        myprint('Done reading in '+str(endHII - startHII)+' HII regions in '+str((time.time() - start_time)/60)+' minutes.\n', args)
         write_fits(logbook.H2R_filename, ppv, args)
+    #------------------------------------------------------------------------#
     if args.debug:
         spec_total(properties.dispsol, ppv, 'Spectrum for only H2R after spec smear', args, logbook)
-        myprint('Deb705: Trying to calculate some statistics on the cube of shape ('+str(np.shape(ppv)[0])+','+str(np.shape(ppv)[1])+','+str(np.shape(ppv)[2])+'), please wait...', args)
+        myprint('Deb705: Trying to calculate some statistics on the cube of shape ('+str(np.shape(ppv)[0])+','+str(np.shape(ppv)[1])+\
+        ','+str(np.shape(ppv)[2])+'), please wait for ~5 minutes. Starting at: {:%Y-%m-%d %H:%M:%S}'.format(datetime.datetime.now()), args)
+        time_temp = time.time()
         mydiag('Deb706: in ergs/s/A/pixel: for H2R cube',ppv, args)
-        #myexit('Deb704:', args) #
+        myprint('This done in %s minutes\n' % ((time.time() - time_temp)/60), args)
+    #----to find a pixel which has non zero dat and plot its spectrum--------#
+    if args.debug and not args.hide:
+        XX, YY = np.shape(ppv)[0], np.shape(ppv)[1]
+        x, y= 0, 0
+        dx = 0
+        dy = -1
+        for i in range(max(XX, YY)**2):
+            if (-XX/2 < x <= XX/2) and (-YY/2 < y <= YY/2):
+                if np.array(ppv[x+XX/2,y+YY/2,:]).any(): break
+            if x == y or (x < 0 and x == -y) or (x > 0 and x == 1-y):
+                dx, dy = -dy, dx
+            x, y = x+dx, y+dy
+        xx, yy = x+XX/2, y+YY/2
+    
+        fig = plt.figure(figsize=(15,5))
+        for ii in logbook.wlist:
+            plt.axvline(ii,ymin=0.9,c='black')    
+        plt.ylabel('flam in erg/s/A')
+        plt.xlabel('Wavelength (A)')
+        plt.ylim(-0.2*np.max(ppv[xx,yy,:]), 1.2*np.max(ppv[xx,yy,:]))
+        plt.xlim(logbook.wmin, logbook.wmax)
+        plt.title('Spectrum along 1 LOS')
+        plt.scatter(properties.dispsol, ppv[xx,yy,:], c='k', s=5, label='H2R spec pix ('+str(xx)+','+str(yy)+')')
+    sizex, sizey = np.shape(ppv)[0], np.shape(ppv)[1]
+    
     #-------------------------Now ideal PPV is ready: do whatever with it------------------------------------------------------------------
-    if args.addnoise:
-        if os.path.exists(logbook.skynoise_cubename):
-            properties.skynoise = fits.open(logbook.skynoise_cubename)[0].data
-            myprint('Reading existing skynoise cube from '+logbook.skynoise_cubename+'\n', args)
-        elif args.addnoise:
-            myprint('Computing skynoise cube..\n', args)
-            properties.skynoise = getskynoise(properties.dispsol, logbook.final_pix_size)            
-            write_fits(logbook.skynoise_cubename, properties.skynoise, args, fill_val=np.nan)
-        else: properties.skynoise = None    
     if args.smooth:
         if os.path.exists(logbook.convolved_filename): #read it in if the convolved cube already exists
             myprint('Reading existing convolved cube from '+logbook.convolved_filename+'\n', args)
         else: #make the convolved cube and save it if it doesn't exist already
             if args.debug: print 'Deb718: shape before rebinning = ', np.shape(ppv)
-            myprint('Trying to rebin cube before convolving...\n', args)
-            ppv_rebinned = np.zeros((int(args.galsize/logbook.final_pix_size), int(args.galsize/logbook.final_pix_size), np.shape(ppv)[2]))
-            for ind in range(0,np.shape(ppv)[2]):
-                ppv_rebinned[:,:,ind] = rebin(ppv[:,:,ind], args.res, logbook.new_res) #re-bin 2d array before convolving to make things faster(previously each pixel was of size res)    
-            if args.debug:
-                print 'Deb723: shape after rebinning = ', np.shape(ppv_rebinned)
-                mydiag('Deb724: in ergs/s/A/pixel: for just rebinned PPV cube (before convolution)', ppv_rebinned, args)
-            myprint('Rebinning complete. Trying to parallely convolve with '+str(args.ncores)+' core...\n', args)
+            myprint('Trying to parallely rebin AND convolve with '+str(args.ncores)+' core...\n', args) #
             myprint('Using '+args.ker+' kernel.\nUsing parameter set: sigma= '+str(logbook.sig)+', size= '+str(logbook.size,)+'\n', args)
-            binned_cubename = args.path + 'temp_binned_cube.fits'
-            write_fits(binned_cubename, ppv_rebinned, args, fill_val=np.nan)
-            
-            funcname = HOME+'/models/enzo_model_code/parallel_convolve.py'
+
+            funcname = HOME+'/Work/astro/ayan_codes/enzo_model_code/parallel_convolve.py'
             if args.silent: silent = ' --silent'
             else: silent = ''
             if args.toscreen: toscreen = ' --toscreen'
             else: toscreen = ''
-                    
-            command = 'mpirun -np '+str(args.ncores)+' python '+funcname+' --parallel --sig '+str(logbook.sig)+\
-            ' --pow '+str(args.pow)+' --size '+str(logbook.size)+' --ker '+args.ker+' --convolved_filename '+\
-            logbook.convolved_filename+' --outfile '+args.outfile+' --binned_cubename '+binned_cubename + silent + toscreen
+            if args.debug: debug = ' --debug'
+            else: debug = ''
+            if args.addnoise: noise = ' --addnoise'
+            else: noise = ''
+            if args.saveplot: saveplot = ' --saveplot'
+            else: saveplot = ''
+            if args.hide: hide = ' --hide'
+            else: hide = ''
+            if args.fixed_SNR is not None: fixed_SNR = ' --fixed_SNR '+str(args.fixed_SNR)
+            else: fixed_SNR = ''
+            if args.scale_exp_SNR is not None: scale_exp_SNR = ' --scale_exp_SNR '+str(args.scale_exp_SNR)
+            else: scale_exp_SNR = ''
+            if args.cmin is not None: cmin = ' --cmin '+str(args.cmin)
+            else: cmin = ''
+            if args.cmax is not None: cmax = ' --cmax '+str(args.cmax)
+            else: cmax = ''
+            
+            command = 'mpirun -np '+str(args.ncores)+' python '+funcname+ ' --fitsname '+logbook.fitsname+\
+            ' --sig '+str(logbook.sig) + ' --pow '+str(args.pow)+' --size '+str(logbook.size)+' --ker '+args.ker+' --convolved_filename '+\
+            logbook.convolved_filename+' --outfile '+args.outfile+' --H2R_cubename '+logbook.H2R_filename +\
+            ' --exptime '+str(logbook.exptime)+' --final_pix_size '+ str(logbook.final_pix_size) + ' --xcenter_offset '+\
+            str(args.xcenter_offset) + ' --ycenter_offset '+str(args.ycenter_offset) + ' --galsize '+str(args.galsize)+\
+            ' --intermediate_pix_size '+str(logbook.intermediate_pix_size)+\
+            fixed_SNR + scale_exp_SNR + noise + silent + toscreen + debug + cmin + cmax + saveplot + hide
             subprocess.call([command],shell=True)
-            subprocess.call(['rm -r '+binned_cubename],shell=True)
             
         ppv = fits.open(logbook.convolved_filename)[0].data #reading in convolved cube from file
         if args.debug:
             myprint('Trying to calculate some statistics on the cube, please wait...', args)
-            mydiag('Deb737: in ergs/s/A/pixel: for convolved cube', ppv, args)
-    if not args.maketheory: ppv = makeobservable(ppv, args, logbook, properties) #add noise, clip saturated pixels, etc.
+            mydiag('Deb737: in ergs/s/A: for convolved cube', ppv, args)
+    if not args.maketheory:
+        last_cubename = logbook.convolved_filename if args.smooth else logbook.H2R_filename
+        funcname = HOME+'/Work/astro/ayan_codes/enzo_model_code/parallel_makeobs.py'
+        if args.silent: silent = ' --silent'
+        else: silent = ''
+        if args.toscreen: toscreen = ' --toscreen'
+        else: toscreen = ''
+        if args.debug: debug = ' --debug'
+        else: debug = ''
+        if args.addnoise: noise = ' --addnoise'
+        else: noise = ''
+        if args.noskynoise: skynoise = ' --noskynoise'
+        else: skynoise = ''
+        if args.spec_smear: smear = ' --spec_smear '
+        else: smear = ''
+        if args.saveplot: saveplot = ' --saveplot'
+        else: saveplot = ''
+        if args.hide: hide = ' --hide'
+        else: hide = ''
+        if args.fixed_SNR is not None and args.addnoise: fixed_SNR = ' --fixed_SNR '+str(args.fixed_SNR)
+        else: fixed_SNR = ''
+        if args.addnoise and not os.path.exists(logbook.skynoise_cubename):
+            myprint('Computing skynoise cube..\n', args)
+            properties.skynoise = getskynoise(args, logbook, properties)            
+            write_fits(logbook.skynoise_cubename, properties.skynoise, args, fill_val=np.nan)        
+        if args.fixed_noise is not None and args.addnoise:
+            myprint('Preparing for implementing fixed noise model..\n', args)
+            fixed_noise = ' --fixed_noise '+str(args.fixed_noise)
+            line, dr = 'NII6584', 0.1
+            nonoise_line_map = get_no_noise_map(logbook, line) #to scale noise to the mean NII6584 flux at r_scale
+            nonoise_line_map_annulus = get_pixels_within(nonoise_line_map, args, logbook, annulus=True, dr=dr)
+            flux_rscale = np.mean(nonoise_line_map_annulus)
+            #flux_rscale = np.mean([np.percentile(nonoise_line_map_annulus, ind) for ind in np.linspace(50*0.9,50*1.1,10)])
+            myprint('Mean '+line+' flux for no noise case, at '+str(dr*100)+'% annuli of scale_length = '+str(flux_rscale)+' ergs/c/pc^2\n', args)
+            flux_to_scale = ' --flux_to_scale '+str(flux_rscale)
+            if os.path.exists(logbook.skynoise_cubename):
+                properties.skynoise = fits.open(logbook.skynoise_cubename)[0].data
+                myprint('Reading existing skynoise cube from '+logbook.skynoise_cubename+'\n', args)
+            else:
+                myprint('Computing skynoise cube..\n', args)
+                properties.skynoise = getskynoise(args, logbook, properties)            
+                write_fits(logbook.skynoise_cubename, properties.skynoise, args, fill_val=np.nan)
+            N_sky = get_sky_norm(properties, logbook)
+            myprint('Sky noise normalisation in R-band = '+str(N_sky)+'\n', args)
+            sky_norm = ' --sky_norm '+str(N_sky)
+        else:
+            fixed_noise = ''
+            flux_to_scale = ''
+            sky_norm = ''
+        if args.cmin is not None: cmin = ' --cmin '+str(args.cmin)
+        else: cmin = ''
+        if args.cmax is not None: cmax = ' --cmax '+str(args.cmax)
+        else: cmax = ''
+        if args.snr_cmin is not None: snr_cmin = ' --cmin '+str(args.snr_cmin)
+        else: snr_cmin = ''
+        if args.snr_cmax is not None: snr_cmax = ' --cmax '+str(args.snr_cmax)
+        else: snr_cmax = ''
+        if args.scale_length is not None: scale_length = ' --scale_length '+str(args.scale_length)
+        else: scale_length = ''
+        parallel = 'mpirun -np '+str(args.ncores)+' python '+funcname+' --parallel'
+        series = 'python '+funcname
+        series_or_parallel = parallel #USE parallel OR series
+        
+        command = series_or_parallel + ' --fitsname '+logbook.fitsname+' --fitsname_u '+logbook.fitsname_u+' --outfile '+args.outfile+' --last_cubename '+\
+        last_cubename+' --nbin '+str(args.nbin)+' --nres '+str(args.nres)+' --vdel '+str(args.vdel)+' --vdisp '+str(args.vdisp)+' --vres '+str(args.vres)+\
+        ' --nhr '+str(args.nhr)+' --wmin '+str(logbook.wmin)+' --wmax '+str(logbook.wmax)+' --epp '+str(args.el_per_phot)+\
+        ' --gain '+str(args.gain)+' --exptime '+str(logbook.exptime)+' --final_pix_size '+\
+        str(logbook.final_pix_size) + ' --dist '+str(properties.dist)+' --skynoise_cubename '+logbook.skynoise_cubename+' --galsize '+str(args.galsize)+\
+        ' --rad ' + str(args.rad) + ' --multi_realisation ' + str(args.multi_realisation) + ' --xcenter_offset '+\
+        str(args.xcenter_offset) + ' --ycenter_offset '+str(args.ycenter_offset) + fixed_SNR + fixed_noise + smear + noise + skynoise + silent + toscreen + debug + \
+        cmin + cmax + saveplot + hide + scale_length + flux_to_scale + sky_norm + snr_cmin + snr_cmax
+        subprocess.call([command],shell=True)
+    else:    
+        write_fits(logbook.fitsname, ppv, args, fill_val=np.nan) #writing the last cube itself as the ppv cube, if asked to make theoretical cube
+             
+    ppv = fits.open(logbook.fitsname)[0].data #reading in ppv cube from file
+
+    if args.debug and not args.hide:
+        xx, yy = xx * np.shape(ppv)[0]/sizex, yy * np.shape(ppv)[1]/sizey
+        plt.plot(properties.dispsol, ppv[xx,yy,:]*(logbook.final_pix_size*1e3)**2, c='r', label='obs spec pix ('+str(xx)+','+str(yy)+')')
+        plt.legend()
+        plt.show(block=False)
+    
     if args.debug:
-        myprint('Trying to calculate some statistics on the cube, please wait for ~ minutes. Starting at: {:%Y-%m-%d %H:%M:%S}'.format(datetime.datetime.now()), args)
+        myprint('Trying to calculate some statistics on the cube, please wait for ~10 minutes. Starting at: {:%Y-%m-%d %H:%M:%S}'.format(datetime.datetime.now()), args)
         time_temp = time.time()
         mydiag('Deb739: in ergs/s/pc^2/A: for final PPV cube', ppv, args)
         myprint('This done in %s minutes\n' % ((time.time() - time_temp)/60), args)
-        
-    if not args.silent: myprint('Final pixel size on target frame = '+str(logbook.final_pix_size)+' kpc'+' and shape = ('+str(np.shape(ppv)[0])+','+str(np.shape(ppv)[1])+','+str(np.shape(ppv)[2])+') \n', args)
+    
+    myprint('Final pixel size on target frame = '+str(logbook.final_pix_size)+' kpc'+' and shape = ('+str(np.shape(ppv)[0])+','+str(np.shape(ppv)[1])+','+str(np.shape(ppv)[2])+') \n', args)
     #-------------------------Now realistic (smoothed, noisy) PPV is ready------------------------------------------------------------------
-    if not args.hide: spec_total(properties.dispsol, ppv, 'Spectrum for total', args, logbook)
+    #if not args.hide: spec_total(properties.dispsol, ppv, 'Spectrum for total', args, logbook)
     myprint('Returning PPV as variable "ppvcube"'+'\n', args)
     return np.array(ppv)                
 #-------------------------------------------------------------------------------------------
-def makeobservable(cube, args, logbook, properties):
-    if not args.silent: myprint('Making slices to observables, in serial...', args)
-    start_watch = time.time()
+def makeobservable(cube, args, logbook, properties, core_start, core_end, prefix):
     nslice = np.shape(cube)[2]
     new_cube = np.zeros(np.shape(cube))
-    delta_lambda = np.array([properties.dispsol[1]-properties.dispsol[0]]+[(properties.dispsol[i+1]-properties.dispsol[i-1])/2 for i in range(1,len(properties.dispsol)-1)]+[properties.dispsol[-1]-properties.dispsol[-2]]) #wavelength spacing for each wavecell; in Angstrom     
-
-    for k in range(nslice):
-        if not args.silent: myprint('Making observable slice '+str(k+1)+' of '+str(nslice)+' at: {:%Y-%m-%d %H:%M:%S}\n'.format(datetime.datetime.now()), args)
+    new_cube_u = np.zeros(np.shape(cube))
+    
+    for k in range(core_start, core_end):        
+        myprint(prefix+'Making observable slice '+str(k+1)+' of '+str(core_end)+' at: {:%Y-%m-%d %H:%M:%S}\n'.format(datetime.datetime.now()), args)
         map = cube[:,:,k]
-        skynoiseslice = properties.skynoise[k] if properties.skynoise is not None else None
-        factor = properties.flux_ratio * logbook.exptime * args.el_per_phot * delta_lambda[k] / (args.gain * planck * (c*1e3) / (properties.dispsol[k]*1e-10)) #to bring ergs/s/A/pixel to units of counts/pixel (ADUs)
+        map_u = new_cube_u[:,:,k]
+        factor = logbook.exptime * args.el_per_phot * properties.delta_lambda[k] / (args.gain * planck * (c*1e3) / (properties.dispsol[k]*1e-10)) #to bring ergs/s/A/pixel to units of counts/pixel (ADUs)
+        #factor = 1. #
         if args.debug:
-            mydiag('Deb 754: in ergs/s/A/pixel: before factor', map, args)
-            myprint('Deb1434: Factor = flux ratio= %.4E * exptime= %.4E * el_per_phot= %d * delta_lambda=%.3F / (gain= %.2F * planck= %.4E * c= %.4E / lambda=%.2E)'%(properties.flux_ratio, logbook.exptime,\
-            args.el_per_phot, delta_lambda[k], args.gain, planck, c*1e3, properties.dispsol[k]*1e-10), args)
-            myprint('Deb1436: Factor= %.4E\n'%factor, args)
-        map *= factor #to get in counts from ergs/s
+            mydiag(prefix+'Deb 754: in ergs/s/A/pixel: before factor', map, args)
+            myprint(prefix+'Deb1434: Factor = exptime= %.4E * el_per_phot= %.1F / (gain= %.2F * planck= %.4E * c= %.4E / lambda=%.2E)'%(logbook.exptime,\
+            args.el_per_phot, args.gain, planck, c*1e3, properties.dispsol[k]*1e-10), args)
+            myprint(prefix+'Deb1436: Factor= %.4E\n'%factor, args)
+        map *= factor #to get in counts/pixel from ergs/s/A/pixel
         if args.debug:
-            mydiag('Deb 756: in counts/A/pixel: after multiplying by factor', map, args)
-        if args.addnoise: map = makenoisy(map, args, logbook, properties, skynoiseslice=skynoiseslice, factor=args.gain, slice=k) #factor=gain as it is already in counts (ADU), need to convert to electrons for Poisson statistics
-        map = np.ma.masked_where(np.log10(map)<0., map) #clip all that have less than 1 count
-        map = np.ma.masked_where(np.log10(map)>5., map) #clip all that have more than 100,000 count i.e. saturating
-        map /= factor #convert back to ergs/s from counts
-        if args.debug: mydiag('Deb 762: in ergs/s/A/pixel: after dividing by factor', map, args)
-        map /= (logbook.final_pix_size*1e3)**2 #convert to ergs/s/pc^2 from ergs/s
-        if args.debug: mydiag('Deb 764: in ergs/s/pc^2/A: after dividing by pixel area', map, args)
+            mydiag(prefix+'Deb 756: in counts/pixel: after multiplying by factor', map, args)
+        if args.addnoise:
+            skynoiseslice = properties.skynoise[k] if properties.skynoise is not None else None
+            logbook.resoln = c/args.vres if args.spec_smear else c/args.vdisp
+            map, map_u = makenoisy(map, args, logbook, properties, skynoiseslice=skynoiseslice, factor=args.gain, slice=k, prefix=prefix) #factor=gain as it is already in counts (ADU), need to convert to electrons for Poisson statistics
+            #map, map_u = makenoisy(map, args, logbook, properties, skynoiseslice=skynoiseslice, factor=1., slice=k, prefix=prefix) #factor=gain as it is already in counts (ADU), need to convert to electrons for Poisson statistics
+        if args.debug: myprint(prefix+'Deb898: # of non zero elements in map before clipping= '+str(len(map.nonzero()[0])), args)
+        #map = np.ma.masked_where(map < 1, map) #clip all that have less than 1 count
+        map = np.ma.masked_where(map > 1e5, map) #clip all that have more than 100,000 count i.e. saturating
+        if args.debug: myprint(prefix+'Deb898: # of non zero elements in map after clipping= '+str(len(map.nonzero()[0])), args)
+        map /= factor #convert back to ergs/s/A/pixel from counts/pixel
+        map_u /= factor #convert back to ergs/s/A/pixel from counts/pixel
+        if args.debug: mydiag(prefix+'Deb 762: in ergs/s/A/pixel: after dividing by factor', map, args)
+        map /= (logbook.final_pix_size*1e3)**2 #convert to ergs/s/pc^2/A from ergs/s/pix/A
+        map_u /= (logbook.final_pix_size*1e3)**2 #convert to ergs/s/pc^2/A from ergs/s/pix/A
+        if args.debug: mydiag(prefix+'Deb 764: in ergs/s/pc^2/A: after dividing by pixel area', map, args)
         new_cube[:,:,k] = map
-    if not args.silent: myprint('Serially: time taken to make observables of '+str(nslice)+' slices = '+ str((time.time() - start_watch)/60.)+' min', args)
-    return new_cube
-#-------------------------------------------------------------------------------------------
-def makenoisy(data, args, logbook, properties, skynoiseslice=None, factor=1., slice=None):
-    dummy = copy.copy(data)
-    slice_slab = 100
+        new_cube_u[:,:,k] = map_u
+    return new_cube, new_cube_u
+    
+#----------------to add noise---------------------------------------------------------------------------
+def makenoisy(data, args, logbook, properties, skynoiseslice=None, factor=1., slice=None, prefix=None):
+    data_copy = copy.copy(data)
+    slice_slab = properties.nwbin/5
+    percentile = 90. #to check 90% of the SNR map within 4kpc of galactic center
+    np.random.seed(args.multi_realisation)
     if args.debug:
-        if slice is not None and slice%slice_slab == 0: dummy = plotmap(dummy, 'slice '+str(slice)+': before adding any noise', 'junk', 'counts', args, logbook, islog=False)
-        mydiag('Deb 767: in counts/A/pixel: before adding any noise', dummy, args)
+        if slice is not None and slice%slice_slab == 0: dummy = plotmap(data_copy, 'slice '+str(slice)+': before adding any noise', 'junk', 'counts', args, logbook, makelog=False)
+        mydiag(prefix+'Deb 767: in counts/pixel: before adding any noise', data_copy, args)
     size = args.galsize/np.shape(data)[0]
-    data *= factor #to transform into electrons from physical units
-    if args.debug: mydiag('Deb 771: in el/A/pixel: after mutiplying gain factor', data, args)
+    data *= factor #to transform into electrons/pixel from physical units/pixel
+    if args.debug: mydiag(prefix+'Deb 771: in el/pixel: after mutiplying gain factor, before adding noise', data, args)
     if args.fixed_SNR is not None: #adding only fixed amount of SNR to ALL spaxels
-        noisydata = data + np.random.normal(loc=0., scale=np.abs(data/args.fixed_SNR), size=np.shape(data)) #drawing from normal distribution about a mean value of 0 and width =counts/SNR
+        epsilon = 1e-3
+        noise = np.random.normal(loc=0., scale=np.abs((data+epsilon)/args.fixed_SNR), size=np.shape(data)) #drawing from normal distribution about a mean value of 0 and width =counts/SNR
+                                                                                                            #adding epsilon otherwise cant add errors with zero width (=scale), for cells that have no counts
+        noisydata = data + noise
         if args.debug:
-            if slice is not None and slice%slice_slab == 0: dummy = plotmap(noisydata, 'slice '+str(slice)+': after fixed_SNR '+str(args.fixed_SNR)+' noise', 'junk', 'counts', args, logbook, islog=False)
-            mydiag('Deb 775: in el/A/pixel: after fixed_SNR '+str(args.fixed_SNR)+' noise', noisydata, args)
+            mydiag(prefix+'Deb 775: in el/pixel: after fixed_SNR '+str(args.fixed_SNR)+' noise', noisydata, args)
+            snr_map = data/noise
+            snr_map = np.ma.masked_where(data<=0, snr_map)
+            if slice is not None and slice%slice_slab == 0:
+                dummy = plotmap(noisydata, 'slice '+str(slice)+': after fixed_SNR '+str(args.fixed_SNR)+' noise', 'junk', 'counts', args, logbook, makelog=False)
+                dummy = plotmap(snr_map, 'slice '+str(slice)+': SNR map', 'junk', 'ratio', args, logbook, makelog=False)
+    elif args.fixed_noise is not None: #adding same (but lambda dependent) noise to all spatial pixels
+        skynoiseslice = np.array(skynoiseslice)
+        skynoiseslice[skynoiseslice <= 0.] = 1e-9 #extremely small to avoid 0
+        skynoiseslice /= properties.delta_lambda[slice] #to bring skynoise from units of el/s/spaxel to el/s/spaxel/A
+        skycontrib = skynoiseslice/args.sky_norm #sky_norm is already in units of el/s/spaxel/A; so skycontrib is now dimensionless
+        
+        lambda_NII = logbook.wlist[logbook.llist=='NII6584'][0]
+        delta_lambda_NII = properties.delta_lambda[np.where(properties.dispsol >= lambda_NII)[0][0]]
+        npix_NII = 2*args.nres #4. #number of points the NII line is resolved with (during line fitting)
+        fixednoise = skycontrib * (args.flux_to_scale/ (args.fixed_noise * np.sqrt(npix_NII) * delta_lambda_NII))  #args.flux_to_scale is in ergs/s/pc^2 units; now fixednoise becomes in ergs/s/pc^2/A units
+        fixednoise *= logbook.exptime * (logbook.final_pix_size*1e3)**2 * args.el_per_phot * properties.delta_lambda[slice] / (planck * (c*1e3) / (properties.dispsol[slice]*1e-10)) #convert from ergs/s/pc^2/A units t el/pixel
+        #fixednoise *= (logbook.final_pix_size*1e3)**2
+        sigma_map = np.ones(np.shape(map))*fixednoise #1 sigma uncertainty at every pixel, will be spatially uniform in this case
+
+        noise = np.random.poisson(lam=fixednoise**2, size=np.shape(data)) - fixednoise**2
+        #noise = np.random.normal(loc=0., scale=fixednoise, size=np.shape(data))
+        noisydata = data + noise #data and noise both in el/pixel units
+
+        if args.debug:
+            if slice is not None and slice%slice_slab == 0:
+                dummy = plotmap(data, 'slice '+str(slice)+': before fixed noise', 'junk', 'ergs/s/pc^2', args, logbook, makelog=False)
+                dummy = plotmap(noisydata, 'slice '+str(slice)+': after fixed noise', 'junk', 'ergs/s/pc^2', args, logbook, makelog=False)
+            mydiag(prefix+'Deb 781: in el/pixel: with skycontrib = '+str(skycontrib)+' and only fixed noise of '+str(fixednoise), noise, args)
+            mydiag(prefix+'Deb 782: in el/pixel: after adding fixed noise', noisydata, args)
     else:
+        #------adding poisson noise-----------
         noisydata = np.random.poisson(lam=data, size=None) #adding poisson noise to counts (electrons)
         noisydata = noisydata.astype(float)
+        poissonnoise = noisydata - data_copy
         if args.debug:
-            if slice is not None and slice%slice_slab == 0: dummy = plotmap(noisydata, 'slice '+str(slice)+': after poisson', 'junk', 'counts', args, logbook, islog=False)
-            mydiag('Deb 783: in el/A/pixel: after adding poisson noise', noisydata, args)
-        readnoise = np.sqrt(2*7.) * np.random.normal(loc=0., scale=3.5, size=np.shape(noisydata)) #to draw gaussian random variables from distribution N(0,3.5) where 3.5 is width in electrons per pixel
-                                    #sqrt(14) is to account for the fact that for SAMI each spectral fibre is 2 pix wide and there are 7 CCD frames for each obsv
-        if args.debug: mydiag('Deb 781: in el/A/pixel: only RDNoise', readnoise, args)
+            if slice is not None and slice%slice_slab == 0: dummy = plotmap(noisydata, 'slice '+str(slice)+': after poisson', 'junk', 'counts', args, logbook, makelog=False)
+            mydiag(prefix+'Deb 783: in el/pixel: after adding poisson noise', noisydata, args)
+        #------adding readnoise-----------
+        '''
+        readnoise = np.random.normal(loc=0., scale=3.5, size=np.shape(noisydata)) #to draw gaussian random variables from distribution N(0,3.5) where 3.5 is width in electrons per pixel
+                                    #multiply sqrt(14) to account for the fact that for SAMI each spectral fibre is 2 pix wide and there are 7 CCD frames for each obsv
+        if args.debug: mydiag(prefix+'Deb 781: in el/pixel: only RDNoise', readnoise, args)
         noisydata += readnoise #adding readnoise
         if args.debug:
-            if slice is not None and slice%slice_slab == 0: dummy = plotmap(noisydata, 'slice '+str(slice)+': after readnoise', 'junk', 'counts', args, logbook, islog=False)
-            mydiag('Deb 783: in el/A/pixel: after adding readnoise', noisydata, args)
+            if slice is not None and slice%slice_slab == 0: dummy = plotmap(noisydata, 'slice '+str(slice)+': after readnoise', 'junk', 'counts', args, logbook, makelog=False)
+            mydiag(prefix+'Deb 783: in el/pixel: after adding readnoise', noisydata, args)
+        '''
+        readnoise = np.zeros(np.shape(noisydata)) #not adding readnoise bcz skynoise includes it already
+        #------adding sky noise-----------
         if skynoiseslice is not None and skynoiseslice != 0: 
             skynoise = np.random.normal(loc=0., scale=np.abs(skynoiseslice), size=np.shape(noisydata)) #drawing from normal distribution about a sky noise value at that particular wavelength
-            noisydata /= logbook.exptime #converting to electrons/s just to add skynoise, bcz skynoise is also in el/s units
+            skynoise *= logbook.exptime*(((3600*180./np.pi)*logbook.final_pix_size/(properties.dist*1e3))**2/(0.5)**2) #converting skynoise from el/s/spaxel to el/pixel; each spaxel = 0.5"x0.5" FoV (of sky) for EACH pixel for SAMI noise cube
+            if args.debug: mydiag(prefix+'Deb 790: in el/pixel: only skynoise+RDnoise', skynoise, args)
             noisydata += skynoise #adding sky noise
-            noisydata *= logbook.exptime #converting back to electrons units
-        if args.debug:
-            if slice is not None and slice%slice_slab == 0: dummy = plotmap(noisydata, 'slice '+str(slice)+': after skynoise', 'junk', 'counts', args, logbook, islog=False)
-            mydiag('Deb 795: in el/A/pixel: after adding skynoise', noisydata, args)
-
-    noisydata /= factor #converting back to physical units from electrons
-    if args.debug: mydiag('Deb 803: in counts/A/pixel: after dividing gain factor', noisydata, args)
+            if slice is not None and slice%slice_slab == 0:
+                dummy = plotmap(noisydata, 'slice '+str(slice)+': after skynoise', 'junk', 'counts', args, logbook, makelog=False)
+        else: skynoise = np.zeros(np.shape(noisydata))
+        #------finished adding noise-----------
+        
+    noisydata /= factor #converting back to physical units/pixel from electrons/pixel
+    totalnoise = noisydata - data_copy
     if args.debug:
-        noise = noisydata - dummy
-        myprint('Net effect of all noise:\n'+\
-        'makenoisy: array median std min max'+'\n'+\
-        'makenoisy: data '+str(np.median(dummy))+' '+str(np.std(dummy))+' '+str(np.min(masked_data(dummy)))+' '+str(np.max(dummy))+'\n'+\
-        'makenoisy: noisydata '+str(np.median(noisydata))+' '+str(np.std(noisydata))+' '+str(np.min(masked_data(noisydata)))+' '+str(np.max(noisydata))+'\n'+\
-        'makenoisy: noise '+str(np.median(noise))+' '+str(np.std(noise))+' '+str(np.min(masked_data(noise)))+' '+str(np.max(noise))+'\n'\
-        , args)
-    return noisydata
-#-------------------------------------------------------------------------------------------
-def inspectmap(args, logbook, properties):
-    g,x,y = calcpos(logbook.s, args.galsize, args.res)
+        snr_map = data_copy/totalnoise
+        snr_map = np.ma.masked_where((data_copy<=0) | (totalnoise<=0), snr_map)
+        try:
+            snr_frac = np.percentile(get_pixels_within(snr_map, args, logbook), 100 - percentile)
+            mydiag(prefix+'Deb 797: in ratio-units: SNR map', snr_map, args)
+            myprint(prefix+'Deb798: makenoisy: Net effect of adding noise:\n', args)
+            mydiag(prefix+'Deb 800: in counts/pixel: total noise', totalnoise, args)
+            mydiag(prefix+'Deb 803: in counts/pixel: after adding noise dividing gain factor', noisydata, args)
+        except: snr_frac = 0.
+        myprint(prefix+'Deb 796: '+str(percentile)+'% pixels within '+str(args.scale_length)+'kpc are above SNR='+str(snr_frac), args)
+        if args.scale_exp_SNR:
+            goodfrac = len(snr_map > float(args.scale_exp_SNR))/np.ma.count(snr_map)
+            myprint(prefix+' fraction of pixels above SNR '+str(args.scale_exp_SNR)+' = '+str(goodfrac), args)
+        if slice is not None and slice%slice_slab == 0:
+            dummy = plotmap(snr_map, 'slice '+str(slice)+': SNR map', 'junk', 'ratio', args, logbook, makelog=False, addcircle_radius=args.scale_length, issnrmap=True)                
+            myprint('Pausing for 20...', args)
+            plt.pause(20)
+    return noisydata, sigma_map
+#----to return pixels within a certain readius or annulus--------
+def get_pixels_within(map, args, logbook, radius=None, annulus=False, dr=0.1):
+    if radius is None: radius = args.scale_length
+    rows, cols = np.shape(map)
+    d_list = [np.sqrt((x*logbook.final_pix_size - args.galsize/2. - args.xcenter_offset)**2 + (y*logbook.final_pix_size - args.galsize/2. - args.ycenter_offset)**2) for x in xrange(rows) for y in xrange(cols)] #kpc
+    list = np.array([x for (y,x) in sorted(zip(d_list,map.flatten()), key=lambda pair: pair[0])])
+    d_list = np.sort(d_list)
+    if annulus: list = list[np.abs(d_list - radius)/radius <= dr] #consider only within annulus of "dr" fraction of scale length
+    else: list = list[d_list <= radius] #consider only within scale length of galaxy; default 4 kpc
+    list = np.ma.masked_where(~np.isfinite(list), list)
+    list = np.ma.compressed(list)
+    return list
+
+#-----------------to inspect a given slice after adding noise--------------------------------------------------------------------------
+def inspect_noiseslice(slice, args, logbook, nres=20):
+    test = ap.Namespace()
+    test.slice = slice
+    test.nres = nres
+
+    nonoise_cube = fits.open(logbook.no_noise_fitsname)[0].data
+    wnoise_cube = fits.open(logbook.fitsname)[0].data
+    test.nonoise_cube = np.nan_to_num(nonoise_cube)
+    test.wnoise_cube = np.nan_to_num(wnoise_cube)
+    test.noise_cube = test.wnoise_cube - test.nonoise_cube
     
-    g2=np.shape(properties.ppvcube)[0]
-    if args.met:
-        log_ratio = np.log10(np.divide(logbook.s['NII6584'],(logbook.s['SII6730']+logbook.s['SII6717']))) + 0.264*np.log10(np.divide(logbook.s['NII6584'],logbook.s['H6562']))
-        logOHobj = log_ratio + 0.45*(log_ratio + 0.3)**5
-        
-        myprint('all HIIR n2, s2, ha medians '+str(np.median(logbook.s['NII6584']))+','+str(np.median(logbook.s['SII6730']))+','+str(np.median(logbook.s['H6562']))+'\n'+\
-        'all HIIR n2, s2, ha integrated '+str(np.sum(logbook.s['NII6584']))+','+str(np.sum(logbook.s['SII6730']))+','+str(np.sum(logbook.s['H6562']))+'\n'+\
-        'all HIIR Z/Zsol median '+str(np.median(10**logOHobj))+'\n', args)
-
-        d = np.sqrt((x-args.galsize/2)**2 + (y-args.galsize/2)**2)
-        plt.scatter(d,logOHobj,c='r',s=5,lw=0,label='indiv HII reg')
-        plt.scatter(d,np.divide(logbook.s['NII6584'],(logbook.s['SII6730']+logbook.s['SII6717'])),c='r',s=5,lw=0,marker='s',label='indiv HII reg NII/SII')
-        plt.scatter(d,np.divide(logbook.s['NII6584'],logbook.s['H6562']),c='r',s=5,lw=0,marker='^',label='indiv HII reg NII/Ha')
-        '''
-        #small check for DIG vs HIIR
-        plt.scatter(d,logbook.s['SII6717']/logbook.s['H6562'],c='k',s=5,lw=0,label='indiv HII reg-SII/Ha') #
-        plt.axhline(0.35, c='cyan',label='max allowed for HIIR') #
-        print 'DIG analysis: SII6717/Halpha ratio for indiv HII regions: min, max, median',\
-        np.min(logbook.s['SII6717']/logbook.s['H6562']), np.max(logbook.s['SII6717']/logbook.s['H6562']), np.median(logbook.s['SII6717']/logbook.s['H6562']) #
-        '''
-        tempn2 = make2Dmap(logbook.s['NII6584'], x, y, g2, args.galsize/g2)
-        temps2a = make2Dmap(logbook.s['SII6717'], x, y, g2, args.galsize/g2)
-        temps2b = make2Dmap(logbook.s['SII6730'], x, y, g2, args.galsize/g2)
-        tempha = make2Dmap(logbook.s['H6562'], x, y, g2, args.galsize/g2)
-        
-        log_ratio = np.log10(np.divide(tempn2,(temps2a+temps2b))) + 0.264*np.log10(np.divide(tempn2,tempha))
-        logOHobj = log_ratio + 0.45*(log_ratio + 0.3)**5
-        
-        myprint('summed up HIIR n2, s2a, s2b, ha medians '+str(np.median(masked_data(tempn2)))+','+str(np.median(masked_data(temps2a)))+','+str(np.median(masked_data(temps2b)))+','+str(np.median(masked_data(tempha)))+'\n'+\
-        'summed up HIIR n2, s2a, s2b, ha integrated '+str(np.sum(masked_data(tempn2)))+','+str(np.sum(masked_data(temps2a)))+','+str(np.sum(masked_data(temps2b)))+','+str(np.sum(masked_data(tempha)))+'\n'+\
-        'all HIIR Z/Zsol median '+str(np.median(10**logOHobj))+'\n', args)
-        
-        b = np.linspace(-g2/2 + 1,g2/2,g2)*(args.galsize)/g2 #in kpc
-        d = np.sqrt(b[:,None]**2+b**2)
-        plt.scatter(d.flatten(),logOHobj.flatten(),c='g',s=5,lw=0,label='summed up HII reg')
-        plt.scatter(d.flatten(),(np.divide(tempn2,(temps2a+temps2b))).flatten(),c='g',s=5,lw=0,marker='s',label='summed up HII reg NII/SII')
-        plt.scatter(d.flatten(),(np.divide(tempn2,tempha)).flatten(),c='g',s=5,lw=0,marker='^',label='summed up HII reg NII/Ha')
-        plt.legend()
-        #plt.show(block=False)
-        
-        map = plotmap(tempn2, 'NII6584'+': H2R summed up', 'trial', 'log flux(ergs/s)', args, logbook, islog=True)
-        map = plotmap(temps2a, 'SII6717'+': H2R summed up', 'trial', 'log flux(ergs/s)', args, logbook, islog=True)
-        map = plotmap(temps2b, 'SII6730'+': H2R summed up', 'trial', 'log flux(ergs/s)', args, logbook, islog=True)
-        map = plotmap(tempha, 'H6562'+': H2R summed up', 'trial', 'log flux(ergs/s)', args, logbook, islog=True)
-        
-    else:        
-        fig = plt.figure(figsize=(8,8))
-        fig.subplots_adjust(hspace=0.7, top=0.9, bottom=0.1, left=0.1, right=0.9)
-        ax = plt.subplot(111)
-        pl=ax.scatter(x-15,y-15,c=np.log10(logbook.s[line]), lw=0,s=3,vmin=args.cmin,vmax=args.cmax) #x,y in kpc
-        plt.title(line+': indiv H2R') 
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes("right", size="5%", pad=0.1)
-        plt.colorbar(pl, cax=cax).set_label('log flux(ergs/s)')    
+    test.nonoise_slice = test.nonoise_cube[:,:,test.slice]
+    test.wnoise_slice = test.wnoise_cube[:,:,test.slice]
+    test.noise_slice = test.noise_cube[:,:,test.slice]
     
-        temp = np.zeros((g2,g2))
-        for j in range(len(s)):
-            temp[int(x[j]*g2/galsize)][int(y[j]*g2/galsize)] += s[line][j]
-        map = plotmap(temp, line+': H2R summed up', 'trial', 'log flux(ergs/s)', galsize, galsize/g2, cmin=cmin, cmax=cmax, hide = False, saveplot=saveplot, islog=True)
-           
-    if hasattr(properties, 'mapcube'):
-        mapn2 = properties.mapcube[:,:,np.where(logbook.llist == 'NII6584')[0][0]]
-        maps2a = properties.mapcube[:,:,np.where(logbook.llist == 'SII6717')[0][0]]
-        maps2b = properties.mapcube[:,:,np.where(logbook.llist == 'SII6730')[0][0]]
-        mapha = properties.mapcube[:,:,np.where(logbook.llist == 'H6562')[0][0]]
-        mapn2 = np.ma.masked_where(mapn2<=0., mapn2)
-        maps2a = np.ma.masked_where(maps2a<=0., maps2a)
-        maps2b = np.ma.masked_where(maps2b<=0., maps2b)
-        mapha = np.ma.masked_where(mapha<=0., mapha)
+    args.cmin, args.cmax = None, None #-25, -17
+    args.hide = False
+    args.met = True #to prevent next plotmap() call from masking negative values
+    dummy = plotmap(test.nonoise_slice, 'slice:'+str(test.slice)+' nonoise', 'junk', 'Log (erg/s/A/pc^2)', args, logbook)
+    dummy = plotmap(test.wnoise_slice, 'slice:'+str(test.slice)+' wnoise', 'junk', 'Log (erg/s/A/pc^2)', args, logbook)
+    dummy = plotmap(test.noise_slice, 'slice:'+str(test.slice)+' noise', 'junk', 'Log (erg/s/A/pc^2)', args, logbook)
+    dummy = plotmap(test.nonoise_slice/test.noise_slice, 'slice:'+str(test.slice)+' no-noise/noise', 'junk', 'Ratio', \
+    args, logbook, makelog=False, addcircle_radius=args.scale_length, issnrmap=True)
+    
+    test.nonoise_list = get_pixels_within(test.nonoise_slice, args, logbook, annulus=True)
+    test.wnoise_list = get_pixels_within(test.wnoise_slice, args, logbook, annulus=True)
+    test.noise_list = get_pixels_within(test.noise_slice, args, logbook, annulus=True)
+    
+    plt.figure()
+    test.noise_hist = plt.hist(test.noise_list, histtype='step', bins=100, color='k', label='noise')
+    test.nonoise_hist = plt.hist(test.nonoise_list, histtype='step', bins=100, color='r', label='nonoise')
+    test.wnoise_hist = plt.hist(test.wnoise_list, histtype='step', bins=100, color='b', label='wnoise')
+    plt.title('test: slice'+str(test.slice))
+    plt.xlabel('flam (erg/s/A/pc^2)')
+    plt.ylabel('Frequency')
+    plt.legend(loc='best')
+    plt.show(block=False)
+    
+    test.nonoise_map = np.sum((test.nonoise_cube*properties.delta_lambda)[:,:,test.slice-int(test.nres)/2 : test.slice+int(test.nres)/2], axis=2)
+    test.wnoise_map = np.sum((test.wnoise_cube*properties.delta_lambda)[:,:,test.slice-int(test.nres)/2 : test.slice+int(test.nres)/2], axis=2)
+    test.noise_map = test.wnoise_map -test. nonoise_map
+    
+    dummy = plotmap(test.nonoise_map, 'integrated map:'+str(slice)+' nonoise', 'junk', 'Log (erg/s/pc^2)', args, logbook)
+    dummy = plotmap(test.wnoise_map, 'integrated map:'+str(slice)+' wnoise', 'junk', 'Log (erg/s/pc^2)', args, logbook)
+    dummy = plotmap(test.noise_map, 'integrated map:'+str(slice)+' noise', 'junk', 'Log (erg/s/pc^2)', args, logbook)
 
-        if args.SNR_thresh is not None:
-            #loading all the flux uncertainties
-            mapn2_u = properties.errorcube[:,:,np.where(logbook.llist == 'NII6584')[0][0]]
-            maps2a_u = properties.errorcube[:,:,np.where(logbook.llist == 'SII6717')[0][0]]
-            maps2b_u = properties.errorcube[:,:,np.where(logbook.llist == 'SII6730')[0][0]]
-            mapha_u = properties.errorcube[:,:,np.where(logbook.llist == 'H6562')[0][0]]
-            mapn2_u = np.ma.masked_where(mapn2_u<=0., mapn2_u)
-            maps2a_u = np.ma.masked_where(maps2a_u<=0., maps2a_u)
-            maps2b_u = np.ma.masked_where(maps2b_u<=0., maps2b_u)
-            mapha_u = np.ma.masked_where(mapha_u<=0., mapha_u)
+    test.nonoise_map_list = get_pixels_within(test.nonoise_map, args, logbook, annulus=True)
+    test.wnoise_map_list = get_pixels_within(test.wnoise_map, args, logbook, annulus=True)
+    test.noise_map_list = get_pixels_within(test.noise_map, args, logbook, annulus=True)
+
+    print 'wnoise/noise maps', np.mean(test.wnoise_map_list/test.noise_map_list), 'nonoise/noise maps', np.mean(test.nonoise_map_list/test.noise_map_list)
+    
+    return test
+    
+#-----------------to get corresponding no-noise line map, used for scaling while adding noise--------------------------------------------------------------------------
+def get_no_noise_map(logbook,line):
+    if os.path.exists(logbook.no_noise_fittedcube):
+        myprint('Reading existing '+logbook.no_noise_fittedcube+'\n', args)
+    else:
+        myprint('Could not find corresponding no-noise version of mapcube at: '+logbook.no_noise_fittedcube+'. So creating one...\n', args)
+        args2 = deepcopy(args)
+        args2.addnoise = False
+        args2.debug = False
         
-            #imposing SNR cut
-            mapn2 = np.ma.masked_where(mapn2/mapn2_u <args.SNR_thresh, mapn2)
-            maps2a = np.ma.masked_where(maps2a/maps2a_u <args.SNR_thresh, maps2a)
-            maps2b = np.ma.masked_where(maps2b/maps2b_u <args.SNR_thresh, maps2b)
-            mapha = np.ma.masked_where(mapha/mapha_u <args.SNR_thresh, mapha)
-
-        g = np.shape(properties.mapcube)[0]
-
-        myprint('mapn2, s2a, s2b, ha max '+str(np.max(mapn2))+','+str(np.max(maps2a))+','+str(np.max(maps2b))+','+str(np.max(mapha))+'\n'+\
-        'mapn2, s2a, s2b, ha min '+str(np.min(mapn2))+','+str(np.min(maps2a))+','+str(np.min(maps2b))+','+str(np.min(mapha))+'\n'+\
-        'mapn2, s2a, s2b, ha integrated '+str(np.sum(mapn2*(args.galsize*1000./g)**2))+','+str(np.sum(maps2a*(args.galsize*1000./g)**2))+','+str(np.sum(maps2b*(args.galsize*1000./g)**2))+','+str(np.sum(mapha*(args.galsize*1000./g)**2))+','+'ergs/s'+'\n'+\
-        '#cells= '+str(g)+' each cell= '+str(args.galsize*1000./g)+' '+'pc'+'\n', args)
-            
-        if args.met:
-            map = plotmap(mapn2, 'NII6584'+' map after fitting', 'Metallicity', 'log flux(ergs/s/pc^2)', args, logbook, islog=True)
-            map = plotmap(maps2a, 'SII6717'+' map after fitting', 'Metallicity', 'log flux(ergs/s/pc^2)', args, logbook, islog=True)
-            map = plotmap(maps2b, 'SII6730'+' map after fitting', 'Metallicity', 'log flux(ergs/s/pc^2)', args, logbook, islog=True)
-            map = plotmap(mapha, 'H6562'+' map after fitting', 'Metallicity', 'log flux(ergs/s/pc^2)', args, logbook, islog=True)
+        properties2 = deepcopy(properties)
+        args2, logbook2 = getfitsname(args2, properties2)
+        args2.outfile = logbook2.fitsname.replace('PPV','output_PPV')[:-5]+'.txt'
+        if logbook2.fittedcube != logbook.no_noise_fittedcube: myexit(args, text='Line 1126 in \
+        plotobservables_old.get_no_noise_map(), "no_noise_mapcube_path" and "logbook2.fittedcube" do not match. Aborting.')
+        if not args2.silent: myprint('Will be using/creating '+logbook2.fitsname+' file.'+'\n', args2)
+        if os.path.exists(logbook2.fitsname):
+            if not args2.silent: myprint('Reading existing ppvcube from '+logbook2.fitsname+'\n', args2)
+            properties2.ppvcube = fits.open(logbook2.fitsname)[0].data
         else:
-            map = plotmap(properties.mapcube[:,:,np.where(logbook.llist == args.line)[0][0]]*(args.galsize*1000./g)**2, args.line+' map after fitting', 'Metallicity', 'log integ flux(ergs/s)', args, logbook, islog=True)
+            if not args2.silent: myprint('PPV file does not exist. Creating ppvcube..'+'\n', args2)
+            properties2.ppvcube = spec(args2, logbook2, properties2)
+
+        if args2.spec_smear: smear = ' --spec_smear'
+        else: smear = ''
+        if args2.silent: silent = ' --silent'
+        else: silent = ''
+        if args2.toscreen: toscreen = ' --toscreen'
+        else: toscreen = ''
+        
+        funcname = HOME+'/Work/astro/ayan_codes/enzo_model_code/parallel_fitting.py'
+        command = 'mpirun -np '+str(args2.ncores)+' python '+funcname+' --fitsname '+logbook2.fitsname+' --fitsname_u '+\
+        logbook2.fitsname_u+' --no_noise_fitsname '+logbook2.no_noise_fitsname+' --nbin '+str(args2.nbin)+\
+        ' --vdel '+str(args2.vdel)+' --vdisp '+str(args2.vdisp)+' --vres '+str(args2.vres)+' --nhr '+str(args2.nhr)+' --wmin '+\
+        str(logbook2.wmin)+' --wmax '+str(logbook2.wmax)+' --fittedcube '+logbook2.fittedcube+' --fittederror '+logbook2.fittederror+\
+        ' --outfile '+args2.outfile+' --nres '+str(args2.nres) + ' --vmask ' +str(args2.vmask) + smear + silent + toscreen
+        subprocess.call([command],shell=True)
+    
+    no_noise_mapcube = fits.open(logbook.no_noise_fittedcube)[0].data
+    no_noise_line_map = np.array(no_noise_mapcube)[:,:,np.where(logbook.llist==line)[0][0]]
+    return no_noise_line_map
+
+#-------------------------------------------------------------------------------------------
+def inspectmap(args, logbook, properties, axes=None):
+    g,x,y = calcpos(logbook.s, args.galsize, args.res)
+    t = args.file+':Met_Om'+str(args.Om)
+    if args.smooth: t += '_arc'+str(args.res_arcsec)+'"'
+    if args.spec_smear: t+= '_vres='+str(args.vres)+'kmps_'
+    t += info+args.gradtext
+    if args.SNR_thresh is not None: t += '_snr'+str(args.SNR_thresh)    
+    if args.useKD: t+= '_KD02'
+    else: t += '_D16'
+    
+    nnum, nden = len(np.unique(args.num_arr)), len(np.unique(args.den_arr))
+    nplots = nnum + nden + len(args.num_arr) + 1
+    nrow, ncol = int(np.ceil(float(nplots/3))), min(nplots,3)
+    marker_arr = ['s', '^']
+    met_maxlim, alpha = 0.5, 0.1
+
+    if axes is None:
+        fig, axes = plt.subplots(nrow, ncol, sharex=True, figsize=(14,8))
+        fig.subplots_adjust(hspace=0.1, wspace=0.25, top=0.9, bottom=0.1, left=0.07, right=0.98)
+    else:
+        fig = plt.gcf()
+    #----------plotting individual H2R---------------------------
+    d = np.sqrt((x-args.galsize/2 - args.xcenter_offset)**2 + (y-args.galsize/2 - args.ycenter_offset)**2) #kpc
+    plot_index, col, already_plotted = 0, 'r', []
+    
+    indiv_map_num, indiv_map_den = [],[]
+    for num_grp in args.num_arr:
+        log_fluxmin, log_fluxmax = 0, -100
+        ax = axes[plot_index/ncol][plot_index%ncol]
+        indiv_map_num_grp = []
+        if not iterable(num_grp): num_grp = [num_grp]
+        if num_grp not in already_plotted:
+            plot = True
+            already_plotted.append(num_grp)
+        else: plot=False
+        for (jj,num) in enumerate(num_grp):        
+            temp = logbook.s[num]*properties.flux_ratio
+            indiv_map_num_grp.append(temp)
+            if plot:
+                ax.scatter(d.flatten(), np.log10(temp.flatten()), s=5, lw=0, marker=marker_arr[jj], c=col, alpha=alpha, label='pixel' if plot_index==1 else None)
+                if np.min(np.log10(np.ma.masked_where(temp<=0, temp))) < log_fluxmin: log_fluxmin = np.min(np.log10(np.ma.masked_where(temp<=0, temp)))
+                if np.max(np.log10(temp)) > log_fluxmax: log_fluxmax = np.max(np.log10(temp))
+                myprint('all HIIR: '+num+' median= '+str(np.median(temp))+', integrated= '+str(np.sum(temp)), args)
+        indiv_map_num.append(indiv_map_num_grp)
+        ax.set_ylim(log_fluxmin, np.log10(30*10**log_fluxmax))
+        ax.set_ylabel('log('+','.join(num_grp)+')')
+        if plot: plot_index += 1
+
+    for den_grp in args.den_arr:
+        log_fluxmin, log_fluxmax = 0, -100
+        indiv_map_den_grp = []
+        ax = axes[plot_index/ncol][plot_index%ncol]
+        if not iterable(den_grp): den_grp = [den_grp]
+        if den_grp not in already_plotted:
+            plot = True
+            already_plotted.append(den_grp)
+        else: plot=False
+        for (jj,den) in enumerate(den_grp):
+            temp = logbook.s[den]*properties.flux_ratio
+            indiv_map_den_grp.append(temp)
+            if plot:
+                ax.scatter(d.flatten(), np.log10(temp.flatten()), s=5, lw=0, marker=marker_arr[jj], c=col, alpha=alpha)
+                if np.min(np.log10(np.ma.masked_where(temp<=0, temp))) < log_fluxmin: log_fluxmin = np.min(np.log10(np.ma.masked_where(temp<=0, temp)))
+                if np.max(np.log10(temp)) > log_fluxmax: log_fluxmax = np.max(np.log10(temp))
+                myprint('all HIIR: '+den+' median= '+str(np.median(temp))+', integrated= '+str(np.sum(temp)), args)
+        indiv_map_den.append(indiv_map_den_grp)
+        ax.set_ylim(log_fluxmin, np.log10(30*10**log_fluxmax))
+        ax.set_ylabel('log('+','.join(den_grp)+')')
+        if plot: plot_index += 1
+
+    indiv_map_num_series = [np.ma.sum(indiv_map_num[ind], axis=0) for ind in range(len(args.num_arr))]        
+    indiv_map_den_series = [np.ma.sum(indiv_map_den[ind], axis=0) for ind in range(len(args.den_arr))]        
+
+    if args.useKD: logOHsol, logOHobj_indiv_map = get_KD02_met(indiv_map_num_series,indiv_map_den_series)
+    else: logOHsol, logOHobj_indiv_map = get_D16_met(indiv_map_num_series,indiv_map_den_series)
+    myprint('all HIIR: median max min Z/Zsol= '+str(np.median(10**logOHobj_indiv_map))+' '+str(np.max(10**logOHobj_indiv_map))+\
+    ' '+str(np.min(10**logOHobj_indiv_map)), args)
+
+    for ii in range(len(indiv_map_num_series)):
+        ax = axes[plot_index/ncol][plot_index%ncol]
+        ax.scatter(d.flatten(), np.divide(indiv_map_num_series[ii],indiv_map_den_series[ii]).flatten(), s=5, lw=0, marker=marker_arr[jj], c=col, alpha=alpha)
+        ax.set_ylabel('+'.join(args.num_arr[ii])+'/'+'+'.join(args.den_arr[ii]))
+        plot_index += 1
+        
+    ax = axes[plot_index/ncol][plot_index%ncol]
+    ax.scatter(d.flatten(),logOHobj_indiv_map.flatten(), s=5, lw=0, c=col, alpha=alpha)
+    linefit, linecov = np.polyfit(d.flatten(), logOHobj_indiv_map.flatten(), 1, cov=True)
+    x_arr = np.arange(args.galsize/2)
+    ax.plot(x_arr, np.poly1d(linefit)(x_arr), c=col,label='Indiv H2R gradient slope='+str('%.4F'%linefit[0]))
+    #-------------plotting binned maps------------------------------------
+    g = np.shape(properties.ppvcube)[0]
+    b = np.linspace(-g/2 + 1,g/2,g)*(args.galsize)/g #in kpc
+    d = np.sqrt((b[:,None] - args.xcenter_offset)**2+(b - args.ycenter_offset)**2) #kpc
+    plot_index, col, already_plotted = 0, 'g', []
+
+    binned_map_num, binned_map_den = [],[]
+    for num_grp in args.num_arr:
+        ax = axes[plot_index/ncol][plot_index%ncol]
+        binned_map_num_grp = []
+        if not iterable(num_grp): num_grp = [num_grp]
+        if num_grp not in already_plotted:
+            plot = True
+            already_plotted.append(num_grp)
+        else: plot=False
+        for (jj,num) in enumerate(num_grp):        
+            temp = make2Dmap(logbook.s[num], x, y, g, args.galsize/g)*properties.flux_ratio
+            binned_map_num_grp.append(temp)
+            if plot:
+                if not args.nomap: plotmap(temp, num+': H2R binned', 'binned', 'log flux(ergs/s)', args, logbook, makelog=True)
+                ax.scatter(d.flatten(), np.log10(temp.flatten()), s=5, lw=0, marker=marker_arr[jj], c=col, alpha=alpha, label='pixel' if plot_index==1 else None)
+                myprint('all HIIR: '+num+' median= '+str(np.median(temp))+', integrated= '+str(np.sum(temp)), args)
+        binned_map_num.append(binned_map_num_grp)
+        if plot:
+            plot_index += 1
+
+    for den_grp in args.den_arr:
+        binned_map_den_grp = []
+        ax = axes[plot_index/ncol][plot_index%ncol]
+        if not iterable(den_grp): den_grp = [den_grp]
+        if den_grp not in already_plotted:
+            plot = True
+            already_plotted.append(den_grp)
+        else: plot=False
+        for (jj,den) in enumerate(den_grp):
+            temp = make2Dmap(logbook.s[den], x, y, g, args.galsize/g)*properties.flux_ratio
+            binned_map_den_grp.append(temp)
+            if plot:
+                if not args.nomap: plotmap(temp, den+': H2R binned', 'binned', 'log flux(ergs/s)', args, logbook, makelog=True)
+                ax.scatter(d.flatten(), np.log10(temp.flatten()), s=5, lw=0, marker=marker_arr[jj], c=col, alpha=alpha)
+                myprint('binned HIIR: '+den+' median= '+str(np.median(temp))+', integrated= '+str(np.sum(temp)), args)
+        binned_map_den.append(binned_map_den_grp)
+        if plot:
+            plot_index += 1
+
+    binned_map_num_series = [np.ma.sum(binned_map_num[ind], axis=0) for ind in range(len(args.num_arr))]        
+    binned_map_den_series = [np.ma.sum(binned_map_den[ind], axis=0) for ind in range(len(args.den_arr))]        
+
+    if args.useKD: logOHsol, logOHobj_binned_map = get_KD02_met(binned_map_num_series,binned_map_den_series)
+    else: logOHsol, logOHobj_binned_map = get_D16_met(binned_map_num_series,binned_map_den_series)
+    myprint('binned HIIR: median Z/Zsol= '+str(np.median(10**logOHobj_binned_map)), args)
+
+    for ii in range(len(binned_map_num_series)):
+        ax = axes[plot_index/ncol][plot_index%ncol]
+        ax.scatter(d.flatten(), np.divide(binned_map_num_series[ii],binned_map_den_series[ii]).flatten(), s=5, lw=0, marker=marker_arr[jj], c=col, alpha=alpha)
+        ax.set_ylim(args.ratio_lim[ii])
+        plot_index += 1
+        
+    ax = axes[plot_index/ncol][plot_index%ncol]
+    ax.scatter(d.flatten(),logOHobj_binned_map.flatten(), s=5, lw=0, c=col, alpha=alpha)
+    linefit, linecov = np.polyfit(d.flatten(), logOHobj_binned_map.flatten(), 1, cov=True)
+    x_arr = np.arange(args.galsize/2)
+    ax.plot(x_arr, np.poly1d(linefit)(x_arr), c=col,label='Binned H2R gradient slope='+str('%.4F'%linefit[0]))
+    plt.legend(fontsize=8, loc='lower left')
+    
+    ax.set_ylabel('Z/Z_sun')
+    ax.set_ylim(-2,met_maxlim)
+    ax.set_xlim(0,args.galsize/2)
+    fig.text(0.5, 0.03, 'Galactocentric distance (kpc)', ha='center')
+    fig.text(0.5,0.95, t, ha='center')                  
+    if args.getmap: dummy = plotmap(logOHobj_binned_map, t+'_binned', 'Metallicity', 'log(Z/Z_sol)', args, logbook, makelog=False)
     
     return
 #-------------------------------------------------------------------------------------------
+def fixfit(args, logbook, properties):
+
+    if not np.array(properties.ppvcube[args.X, args.Y, :]).any():
+        myprint('Chosen spaxel is empty. Select another.', args)
+        myprint('Non empty spaxels are:', args)
+        for i in range(np.shape(properties.ppvcube)[0]):
+            for j in range(np.shape(properties.ppvcube)[1]):
+                if np.array(properties.ppvcube[i, j, :]).any():
+                    print i, j
+       
+        myexit(args, text='Try again.')
+
+    args.showplot = True
+    args.toscreen = True
+    logbook.resoln = c/args.vres if args.spec_smear else c/args.vdisp
+    
+    wave = np.array(properties.dispsol)  #converting to numpy arrays
+    flam = np.array(properties.ppvcube[args.X,args.Y,:]) #in units ergs/s/A/pc^2
+    #flam = np.array((fits.open(logbook.no_noise_fitsname)[0].data)[args.X,args.Y,:]) #in units ergs/s/A/pc^2
+    flam_u = np.array(properties.ppvcube_u[args.X,args.Y,:]) #in units ergs/s/A/pc^2
+    
+    lastgood, lastgood_u = flam[0], flam_u[0]
+    for ind,ff in enumerate(flam):
+        if not np.isnan(ff):
+            lastgood, lastgood_u = ff, flam_u[ind]
+            continue
+        else:
+            flam[ind] = lastgood #to get rid of NANs in flam
+            flam_u[ind] = lastgood_u #to get rid of NANs in flam_u
+
+    cont, cont_u = fitcont(wave, flam, flam_u, args, logbook) #cont in units ergs/s/A/pc^2
+    print 'flux, flux_u (before contnorm)=', flam[:20], flam_u[:20] #
+    if args.contsub:
+        flam_u = np.sqrt(flam_u**2 + cont_u**2)
+        flam -= cont
+    else:
+        flam_u = np.sqrt((flam_u/cont)**2 + (flam*cont_u/(cont**2))**2) #flam_u = dimensionless
+        flam /= cont #flam = dimensionless
+    print 'cont', cont[:20], cont_u[:20] #
+    print 'flux, flux_u (after contnorm)=', flam[:20], flam_u[:20] #
+    #-------------------------------------------------------------------------------------------
+    fig = plt.figure(figsize=(17,5))
+    fig.subplots_adjust(hspace=0.7, top=0.85, bottom=0.1, left=0.05, right=0.95)
+    plt.scatter(wave, flam, c='k', s=5, lw=0, label='Spectrum at '+str(args.X)+', '+str(args.Y))
+    plt.plot(wave, flam, c='k', label='Spectrum at '+str(args.X)+', '+str(args.Y))
+    plt.plot(wave, flam_u, c='gray', linestyle='dashed', label='Error at '+str(args.X)+', '+str(args.Y))
+    scaling = 0.5*1e-18 if args.contsub else 1.
+    plt.plot(wave, flam/flam_u*scaling, c='b', alpha=0.3, label='SNRx'+str(scaling)+' at '+str(args.X)+', '+str(args.Y))
+    plt.plot(wave, cont, c='g', lw=1, alpha=1, label='Continuum at '+str(args.X)+', '+str(args.Y))
+    plt.plot(wave, cont_u, c='cyan', lw=1, alpha=0.8, label='Continuum uncert at '+str(args.X)+', '+str(args.Y))
+    for ii in logbook.wlist:
+        plt.axvline(ii,ymin=0.9,c='black')    
+    plt.ylabel('flam in erg/s/A/pc^2')
+    plt.xlabel('Wavelength (A)')
+    plt.xlim(logbook.wmin, logbook.wmax)
+    plt.title(logbook.fitsname +'\n'+'Fitted spectrum at pp '+str(args.X)+','+str(args.Y))
+    #plt.ylim(-1e-18,6e-18)
+    if args.contsub: plt.ylim(-0.2e-18,1.2e-18) #
+    else: plt.ylim(-10, 20)
+    #plt.xlim(6555, 6600) #
+    #plt.xlim(6705, 6745) #
+    plt.legend()
+    if args.hide: plt.close()
+    else: plt.show(block=False)
+    #-------------------------------------------------------------------------------------------
+    flux, flux_errors = fit_all_lines(args, logbook, wave, flam, flam_u, cont, args.X, args.Y, z=0., z_err=0.0001)
+    x_phys_coord = args.X*logbook.final_pix_size - args.galsize/2 -args.xcenter_offset
+    y_phys_coord = args.Y*logbook.final_pix_size - args.galsize/2 -args.ycenter_offset
+    dist = np.sqrt(x_phys_coord**2 + y_phys_coord**2) #kpc
+    print 'Galacto-centric distance =', dist, 'kpc'
+    print 'Flux=', flux
+    print 'Flux error=', flux_errors
+    print 'shape=', np.shape(properties.ppvcube), 'coord pixel (',args.X, args.Y, ') = (', x_phys_coord, y_phys_coord,') kpc', 'SNR cut=',args.SNR_thresh, 'SNRs=', flux/flux_errors
+    if args.SNR_thresh is not None: flux = np.ma.masked_where(flux/flux_errors < args.SNR_thresh, flux)
+    n2_ind = np.where(logbook.llist=='NII6584')[0][0]
+    s2a_ind = np.where(logbook.llist=='SII6717')[0][0]
+    s2b_ind = np.where(logbook.llist=='SII6730')[0][0]
+    ha_ind = np.where(logbook.llist=='H6562')[0][0]
+    dummy, inferred_met, inferred_met_u = get_D16_met([flux[n2_ind]],[flux[s2a_ind]+flux[s2b_ind], flux[ha_ind]], \
+    num_err = [flux_errors[n2_ind]], den_err = [np.sqrt(flux_errors[s2a_ind]**2+flux_errors[s2b_ind]**2), flux_errors[ha_ind]])
+    print 'Pixel metallicity: inferred =', inferred_met, '+/-', inferred_met_u, 'true =', dist*args.logOHgrad
+    return flux, flux_errors
+#-------------------------------------------------------------------------------------------
+def fitcont(wave, flux, flux_u, args, logbook):
+    flux_masked = flux
+    flux_u_masked = flux_u
+    wave_masked = wave
+    for thisw in logbook.wlist:
+        linemask_width = thisw * 1.5*args.vmask/c
+        flux_masked = np.ma.masked_where(np.abs(thisw - wave) <= linemask_width, flux_masked)
+        flux_u_masked = np.ma.masked_where(np.abs(thisw - wave) <= linemask_width, flux_u_masked)
+        wave_masked = np.ma.masked_where(np.abs(thisw - wave) <= linemask_width, wave_masked)
+    
+    wave_masked = np.ma.masked_where(np.isnan(flux_masked), wave_masked)
+    flux_u_masked = np.ma.masked_where(np.isnan(flux_masked), flux_u_masked)
+    flux_masked = np.ma.masked_where(np.isnan(flux_masked), flux_masked)
+    
+    '''
+    #--option 1: polynomial fit----
+    wave_masked1 = np.ma.compressed(wave_masked)
+    flux_masked1 = np.ma.compressed(flux_masked)
+    inv_chisq, nn, order = [], 3, 20
+    for ind in range(nn,len(wave_masked1)-nn):
+        (dummy1, chisq, dummy2, dummy3, dummy4) = np.polyfit(wave_masked1[ind-nn:ind+nn+1], flux_masked1[ind-nn:ind+nn+1], 2, full=True) #fitting 2nd order polynomial to every set of adjacent 4 points and storing chi^2 of fit as measure of wigglyness
+        try: inv_chisq.append(1./chisq[0])
+        except IndexError: inv_chisq.append(inv_chisq[-1])
+        #plt.plot(wave[ind-nn:ind+nn+1], np.poly1d(dummy1)(wave[ind-nn:ind+nn+1]),c='b') #
+
+    inv_chisq = np.array(inv_chisq)
+    weights = np.log10(np.concatenate(([inv_chisq[0]]*nn, inv_chisq, [inv_chisq[-1]]*nn)))
+
+    weights /= np.max(weights)
+    weights = np.power(weights,1./64) #
+    contpar = np.polyfit(wave_masked1, flux_masked1, order, w=weights)
+    cont = np.poly1d(contpar)(wave)
+    '''
+    '''
+    #--option 2: spline fit------
+    boxcar = 11
+    flux_smoothed = con.convolve(np.array(flux), np.ones((boxcar,))/boxcar, boundary='fill', fill_value=np.nan)
+    flux_smoothed = np.ma.masked_where(np.ma.getmask(flux_masked), flux_smoothed)
+    cont = pd.DataFrame(flux_smoothed).interpolate(method='cubic').values.ravel().tolist()
+    '''
+    #---option 3: legendre fit------
+    #leg = np.polynomial.legendre.Legendre.fit(wave_masked, flux_masked, 4)
+    #cont = np.polynomial.legendre.legval(wave, leg.coef)
+    
+    #---option 4: basis spline fit--------
+    #contfunc = list(si.splrep(wave_masked, flux_masked, k=5))
+    #cont = si.splev(wave, contfunc)
+    
+    #---option 5: mean across uniform spaced lambda and cubic spline interpolation--
+    wave_masked1 = np.ma.compressed(wave_masked)
+    flux_masked1 = np.ma.compressed(flux_masked)
+    flux_u_masked1 = np.ma.compressed(flux_u_masked)
+    wave_bins = np.linspace(logbook.wmin, logbook.wmax, args.nbin/20.)
+    wave_index = np.digitize(wave_masked1, wave_bins, right=True)
+    wave_smoothed = np.array([wave_masked1[np.where(wave_index==ind)].mean() for ind in range(1,len(wave_bins)+1)])
+    flux_smoothed = np.array([flux_masked1[np.where(wave_index==ind)].mean() for ind in range(1,len(wave_bins)+1)])
+    flux_u_smoothed = np.array([flux_u_masked1[np.where(wave_index==ind)].mean() for ind in range(1,len(wave_bins)+1)])
+    flux_smoothed = flux_smoothed[~np.isnan(wave_smoothed)] #dropping those fluxes where mean wavelength value in the bin is nan
+    flux_u_smoothed = flux_u_smoothed[~np.isnan(wave_smoothed)]
+    wave_smoothed = wave_smoothed[~np.isnan(wave_smoothed)]
+    '''
+    #---option 5b: weighted mean-----------
+    weights = 1./(np.array([np.abs(wave_masked[np.where(wave_index==ind)] - wave_smoothed[ind-1]) for ind in range(1,len(wave_bins)+1)]) + 1e-3) #adding small value to avoid weight=0
+    flux_bins = np.array([flux_masked[np.where(wave_index==ind)] for ind in range(1,len(wave_bins)+1)])
+    flux_smoothed = [np.average(flux_bins[ind], weights=weights[ind]) for ind in range(len(wave_bins))]
+    '''
+    contfunc = interp1d(wave_smoothed, flux_smoothed, kind='cubic', fill_value='extrapolate')
+    cont = contfunc(wave)
+    '''
+    #----to estimate uncertainty in continuum: option 1: fit the uncertainty in flux--------
+    contu_func = interp1d(wave_smoothed, flux_u_smoothed, kind='cubic', fill_value='extrapolate')
+    cont_u = contu_func(wave) #np.zeros(len(wave)) #
+    '''
+    
+    #----to estimate uncertainty in continuum: option 2: measure RMS of fitted cont w.r.t input flux--------
+    cont_masked = contfunc(wave_masked1)
+    cont_u = np.ones(len(wave)) * np.sqrt(np.sum((cont_masked - flux_masked1)**2)/len(wave))
+    
+    '''
+    #----to estimate uncertainty in continuum: option 3: measure RMS of fitted smoothed flux w.r.t input flux--------
+    cont_u = np.ones(len(wave)) * np.sqrt(np.sum((flux_smoothed - flux_masked1)**2)/len(wave))/np.sqrt(args,nbin/20.)
+    '''
+    '''
+    #----to estimate uncertainty in continuum: option 3: measure deviation of fitted cont w.r.t input flux--------
+    cont_masked = contfunc(wave_masked1)
+    cont_u_masked = np.abs(cont_masked - flux_masked1)
+    contufunc = interp1d(wave_masked1, cont_u_masked, kind='cubic', fill_value='extrapolate')
+    cont_u = contufunc(wave)
+    '''
+    if 'fixcont' in args and args.fixcont:
+        print np.shape(wave_smoothed), np.shape(cont), wave_smoothed, flux_smoothed, cont #
+        fig = plt.figure(figsize=(17,5))
+        fig.subplots_adjust(hspace=0.7, top=0.85, bottom=0.1, left=0.05, right=0.95)
+        plt.plot(wave, cont, c='g', label='cont')
+        plt.plot(wave, cont_u, c='g', label='cont_u', linestyle='dotted')
+        plt.plot(wave_masked, flux_masked, c='r', label='masked flux')
+        plt.scatter(wave_masked, flux_masked, c='r', lw=0)
+        plt.plot(wave_masked, flux_u_masked, c='orange', linestyle='dashed', label='masked flux_u')
+        plt.plot(wave_smoothed, flux_smoothed, c='k', label='smoothly sampled flux')
+        plt.scatter(wave_smoothed, flux_smoothed, c='k', lw=0)
+        plt.plot(wave_smoothed, flux_u_smoothed, c='gray', linestyle='dashed', label='smoothly sampled flux_u')
+        plt.legend()
+        plt.xlabel('Obs wavelength (A)')
+        plt.ylabel('flambda (ergs/s/A/pc^2)')
+        plt.title('Testing continuum fit for pixel ('+str(args.X)+','+str(args.Y)+')')
+        plt.xlim(logbook.wmin, logbook.wmax)
+        #plt.ylim(-1.5e-20, 2e-20)
+        plt.ylim(-0.2e-18,0.2e-18) #
+        plt.xlim(6555, 6600) #
+        plt.show(block=False)
+        sys.exit()#
+    
+    return np.array(cont), np.array(cont_u)
+#-------------------------------------------------------------------------------------------
 def calcpos(s, galsize, res):
     g = int(np.ceil(galsize/res))
-    x = (s['x']-1500/2)*res + galsize/2
-    y = (s['y']-1500/2)*res + galsize/2
+    x = s['x'] * args.base_res #x should range from 0 to galsize, s['x'] ranges from 0 to ~1300 as the base resolution is 20pc
+    y = s['y'] * args.base_res
     return g, x, y
 #-------------------------------------------------------------------------------------------
-def make2Dmap(data, xi, yi, ngrid, res, domean=False, islog=False):
+def make2Dmap(data, xi, yi, ngrid, res, domean=False, makelog=False, weights=None):
     map = np.zeros((ngrid,ngrid))
-    if domean:
-        count = np.zeros((ngrid,ngrid))
+        
     for i in range(len(data)):
         x = int(xi[i]/res)
         y = int(yi[i]/res)
-        if islog:
-            map[x][y] += 10.**data[i]
-        else:
-            map[x][y] += data[i] 
-        if domean:
-            count[x][y] += 1
-    if domean:
-        map = np.divide(map,count)
-        map[np.isnan(map)] = 0
+        if makelog: quantity = 10.**data[i]
+        else: quantity = data[i]
+        
+        if weights is not None: quantity *= weights[i]        
+
+        map[x][y] += quantity        
+
+    if domean: map = np.divide(map, make2Dmap(np.ones(len(data)), xi, yi, ngrid, res))
+    elif weights is not None: map = np.divide(map, make2Dmap(weights, xi, yi, ngrid, res))
+        
+    map[np.isnan(map)] = 0
     return map 
 #-------------------------------------------------------------------------------------------
-def getskynoise(wave, final_pix_size):
+def getskynoise(args, logbook, properties):
     #to read in sky noise files in physical units, convert to el/s, spectral-bin them and create map
     bluenoise = fits.open(HOME+'/models/Noise_model/NoiseData-99259_B.fits')[1].data[0]
     rednoise  = fits.open(HOME+'/models/Noise_model/NoiseData-99259_R.fits')[1].data[0]
     skywave = np.hstack((bluenoise[0], rednoise[0])) #in Angstrom
-    noise = np.hstack((bluenoise[1], rednoise[1])) #in 10^-16 ergs/s/cm^2/A/spaxel   
-    noise[noise > 100.] = 0. #replacing insanely high noise values
-    noise = 1e-16 * (3.086e18)**2 * np.multiply(noise, skywave)# to convert it to ergs/s/pc^2, as the flux values are
-    factor = (final_pix_size*1e3)**2 * flux_ratio * el_per_phot / (planck * nu) # do we need to multiply with flux_ratio?? Think!
-    noise *= factor #to transform into counts/s (electrons/s) from physical units, because we do not know the exposure time for the skynoise provided by Rob Sharp
-    f = interp1d(skywave, noise, kind='cubic')
-    wave = np.array(wave)
-    smallwave = wave[(wave >= np.min(skywave)) & (wave <= np.max(skywave))]
-    interp_noise = f(smallwave)
-    interp_noise = np.lib.pad(interp_noise, (len(np.where(wave<skywave[0])[0]), len(np.where(wave>skywave[-1])[0])), 'constant', constant_values=(0,0))
+    wave = np.array(properties.dispsol)
+
+    noise = np.hstack((bluenoise[1], rednoise[1])) #in 10^-16 ergs/s/cm^2/A/spaxel
+    noise = noise[(skywave >= np.min(wave)) & (skywave <= np.max(wave))]
+    noise[noise > 1.] = 0. #replacing insanely high noise values
+    skywave = skywave[(skywave >= np.min(wave)) & (skywave <= np.max(wave))]
+    f = interp1d(skywave, noise, kind='cubic',fill_value='extrapolate')
+    interp_noise = f(wave)
+    #interp_noise = np.lib.pad(interp_noise, (len(np.where(wave<skywave[0])[0]), len(np.where(wave>skywave[-1])[0])), 'constant', constant_values=(0,0))
+    interp_noise = 1e-16 * np.multiply(interp_noise, properties.delta_lambda)# to convert it to ergs/s/cm^2/spaxel from ergs/s/cm^2/A/spaxel
+    factor = np.pi*(args.rad*1e2)**2 * args.el_per_phot / (planck * (c*1e3/(wave*1e-10))) #skynoise for each cm^2 spread over entire collecting area of telescope (pi*(args.radius*100)^2)
+    interp_noise *= factor #to transform into electrons/s/spaxel from ergs/s/cm^2/spaxel, because we do not know the exposure time for the skynoise provided by Rob Sharp
     return interp_noise
 #-------------------------------------------------------------------------------------------
-def plotmap(map, title, savetitle, cbtitle, args, logbook, islog=True):    
+def plotmap(map, title, savetitle, cbtitle, args, logbook, makelog=True, addcircle_radius=None, issnrmap=False):    
     fig = plt.figure(figsize=(8,8))
     fig.subplots_adjust(hspace=0.7, top=0.9, bottom=0.1, left=0.1, right=0.9)
     ax = plt.subplot(111)
-    if islog:
-        map = np.ma.masked_where(map<0, map)
-        cmin = np.min(np.log10(map)) if args.cmin is None else args.cmin
-        cmax = np.max(np.log10(map)) if args.cmax is None else args.cmax 
-        map = np.ma.masked_where(np.log10(map)<cmin, map)
-        p = ax.imshow(np.log10(map), cmap='rainbow',vmin=cmin,vmax=cmax)
+    if makelog:
+        a = np.log10(map) #just a shorter variable
+        if issnrmap:
+            cmin = np.nanmin(a[a!=-np.inf]) if args.snr_cmin is None else args.snr_cmin
+            cmax = np.nanmax(a[a!=-np.inf]) if args.snr_cmax is None else args.snr_cmax 
+        else:
+            cmin = np.nanmin(a[a!=-np.inf]) if args.cmin is None else args.cmin
+            cmax = np.nanmax(a[a!=-np.inf]) if args.cmax is None else args.cmax 
+        map = np.ma.masked_where(a<cmin, map)
+        p = ax.imshow(np.log10(np.transpose(map)), cmap='rainbow',vmin=cmin,vmax=cmax)
     else:
-        cmin = np.min(map) if args.cmin is None else args.cmin
-        cmax = np.max(map) if args.cmax is None else args.cmax  
-        map = np.ma.masked_where(map<cmin, map)
-        p = ax.imshow(map, cmap='rainbow',vmin=cmin,vmax=cmax)
-    ax.set_xticklabels([i*logbook.final_pix_size - args.galsize/2 for i in list(ax.get_xticks())])
-    ax.set_yticklabels([i*logbook.final_pix_size - args.galsize/2 for i in list(ax.get_yticks())])
+        a = map #just a shorter variable
+        if issnrmap:
+            cmin = np.nanmin(a[a!=-np.inf]) if args.snr_cmin is None else args.snr_cmin
+            cmax = np.nanmax(a[a!=-np.inf]) if args.snr_cmax is None else args.snr_cmax
+        else:
+            cmin = np.nanmin(a[a!=-np.inf]) if args.cmin is None else args.cmin
+            cmax = np.nanmax(a[a!=-np.inf]) if args.cmax is None else args.cmax  
+        map = np.ma.masked_where(a<cmin, map)
+        p = ax.imshow(np.transpose(map), cmap='rainbow',vmin=cmin,vmax=cmax) #transposing map due to make [X,Y] axis of array correspond to [X,Y] axis of plot
+    ax.set_xticklabels([i*logbook.final_pix_size - args.galsize/2 -args.xcenter_offset for i in list(ax.get_xticks())]) #xcenter_offset in kpc units
+    ax.set_yticklabels([i*logbook.final_pix_size - args.galsize/2 -args.ycenter_offset for i in list(ax.get_yticks())]) #ycenter_offset in kpc units
     plt.ylabel('y(kpc)')
     plt.xlabel('x(kpc)')
     plt.title(title)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.1)
-    plt.colorbar(p, cax=cax).set_label(cbtitle)    
-    #circle1 = plt.Circle((galsize/(2*res), galsize/(2*res)), galsize/(2*res), color='k')#
-    #ax.add_artist(circle1)#
+    plt.colorbar(p, cax=cax).set_label(cbtitle) 
+    if addcircle_radius:
+        circle1 = plt.Circle(((0+args.xcenter_offset+args.galsize/2.)/logbook.final_pix_size, (0+args.ycenter_offset+args.galsize/2.)/logbook.final_pix_size), addcircle_radius/logbook.final_pix_size,color='k', fill=False)
+        ax.add_artist(circle1)
     if args.saveplot: fig.savefig(args.path+savetitle+'.png')
     if args.hide: plt.close(fig)
     else: plt.show(block=False)
@@ -1027,22 +1992,30 @@ def getfn(args):
 #-------------------------------------------------------------------------------------------
 def getsmoothparm(args, properties, logbook):
     if args.parm is None:
-        args.pow, args.size = 4.7, 5 #power and sigma parameters for 2D Moffat kernal in pixel units
+        args.pow, args.size = 4.7, 5 #power and size/sigma parameters for 2D Moffat kernal in pixel units
     else:
-        args.pow, args.size = args.parm[0], int(args.parm[1])
+        args.pow, args.size = args.parm[0], args.parm[1]
     #------------------------------------------------------------------
     #-----Compute effective seeing i.e. FWHM as: the resolution on sky (res_arcsec) -> physical resolution on target frame (res_phys) -> pixel units (fwhm)
-    fwhm = min(properties.res_phys/args.res, args.pix_per_beam) #choose the lesser of 10 pixels per beam or res/res_phys pixels per beam
-    logbook.new_res = properties.res_phys/fwhm #need to re-bin the map such that each pixel is now of size 'new_res' => we have 'fwhm' pixels within every 'res_phys' physical resolution element
-    dummy = np.zeros((1300,1300)) #dummy array to check what actual resolution we are left with after rebinning
-    dummy = rebin(dummy, args.res, logbook.new_res) #mock rebin
-    logbook.final_pix_size = args.galsize/np.shape(dummy)[0] #actual pixel size we will end up with
-    logbook.fwhm = int(np.round(properties.res_phys/logbook.final_pix_size)) #actual no. of pixels per beam we will finally have
+    if np.round(properties.res_phys/args.res, 4) < args.pix_per_beam: myexit(args, text='For given physical resolution ('+str('%.2F'%properties.res_phys)+\
+    ' kpc), pix per beam with base res('+str(args.res)+' kpc) becomes '+str('%.2F'%(properties.res_phys/args.res))+' which is \
+less than the pix per beam asked for ('+str(args.pix_per_beam)+'). Hence, quitting.\n') #if the pix per beam using base resolution is less than required pix per beam then flag and exit
+    logbook.fwhm = args.pix_per_beam
+    new_res = properties.res_phys/logbook.fwhm #need to re-bin the map such that each pixel is now of size 'new_res' => we have 'fwhm' pixels within every 'res_phys' physical resolution element
+    logbook.intermediate_pix_size = args.galsize/int(np.round(args.galsize/new_res)) #actual pixel size we will end up with, after rebinning
+    logbook.fwhm = properties.res_phys/logbook.intermediate_pix_size
+    
     #------------------------------------------------------------------
-    if args.ker == 'gauss': logbook.sig = int(gf2s * logbook.fwhm)
-    elif args.ker == 'moff': logbook.sig = int(np.round(logbook.fwhm/(2*np.sqrt(2**(1./args.pow)-1.))))
-    logbook.size = logbook.sig*args.size
-    if logbook.size%2 == 0: logbook.size += 1 #because kernels need odd integer as size
+    if args.ker == 'gauss': logbook.sig = gf2s * logbook.fwhm
+    elif args.ker == 'moff': logbook.sig = logbook.fwhm/(2*np.sqrt(2**(1./args.pow)-1.))
+    logbook.size = int((logbook.sig*args.size)//2 * 2 + 1) #rounding off to nearest odd integer because kernels need odd integer as size
+    if args.binback:
+        logbook.final_pix_size = args.res #if re-sampling convolved cube back to original finer resolution
+    elif args.binto is not None:
+        dummy_new_res = properties.res_phys/float(args.binto)
+        logbook.final_pix_size = args.galsize/int(np.round(args.galsize/dummy_new_res)) #if re-sampling convolved cube to 'binto' pix per beam
+    else:
+        logbook.final_pix_size = logbook.intermediate_pix_size #if not
     return args, logbook
 #-------------------------------------------------------------------------------------------
 def getfitsname(args, properties):
@@ -1057,29 +2030,58 @@ def getfitsname(args, properties):
     if args.spec_smear: info += '_specsmeared_'+str(int(args.vres))+'kmps'
     info1 = info
     if args.smooth:
+        arc_string = '_arc='+str(args.res_arcsec)
         args, logbook = getsmoothparm(args, properties, logbook)
-        info += '_smeared_'+args.ker+'_parm'+str(logbook.fwhm)+','+str(logbook.sig)+','+str(args.pow)+','+str(logbook.size)
-    else: logbook.final_pix_size = args.res
-    info2 = info
-    if args.addnoise: info += '_noisy'
-    if args.fixed_SNR is not None: info += '_fixedSNR'+str(args.fixed_SNR)
-    if not args.maketheory: info+= '_obs'
-    if args.exptime is not None:
-        logbook.exptime = float(args.exptime)
+        info += '_smeared_'+args.ker+'_parm'+str('%.1F'%logbook.fwhm)+','+str('%.1F'%logbook.sig)+','+str('%.1F'%args.pow)+','+str(logbook.size)
+        if args.binto: info += '_binto'+str(args.binto)
+        elif args.binback: info += '_binback'
     else:
-        if args.scale_exptime: scalefactor = float(args.scale_exptime)
-        else: scalefactor = 240000. #sec
-        logbook.exptime = float(scalefactor)*(args.res/logbook.final_pix_size)**2 #increasing exposure time quadratically with finer resolution, with fiducial values of 600s for 0.5"
+        logbook.final_pix_size = args.res
+        arc_string = ''
+    info2 = info
+    if args.addnoise:
+        info += '_noisy'
+        if args.fixed_SNR is not None: info += '_fixed_SNR'+str(args.fixed_SNR)
+        if args.fixed_noise is not None: info += '_fixed_noise'+str(args.fixed_noise)
+    if not args.maketheory:
+        info+= '_obs'
+        if args.exptime is not None:
+            logbook.exptime = float(args.exptime)
+        else:
+            if args.scale_exptime: scalefactor = float(args.scale_exptime)
+            elif args.scale_exp_SNR: scalefactor = 1200. * float(args.scale_exp_SNR)
+            else: scalefactor = 1200. #sec
+            if not args.fixed_SNR: info += '_scaled'
+            lambda_spacing = args.vres * 6562./c if args.spec_smear else 10*args.vdel*6562./(args.nhr*c)
+            logbook.exptime = float(scalefactor)*(0.08/logbook.final_pix_size)**2 * (0.6567/lambda_spacing) #increasing exposure time quadratically with finer resolution
+                                                                                                            #scaled to <scale_factor> sec for 2" (=0.08kpc cell size = 0.54kpc FWHM) spatial and 30kmps spectral resolution
 
-    info += '_exp'+str(logbook.exptime)+'s'
+        info += '_exp'+str(int(logbook.exptime))+'s'
     if args.multi_realisation: info += '_real'+str(args.multi_realisation)
     
-    logbook.H2R_filename = args.path + 'H2R_'+args.file+'Om='+str(args.Om)+'_'+str(logbook.wmin)+'-'+str(logbook.wmax)+'A' + info1+ args.gradtext+'.fits'
-    logbook.skynoise_cubename = args.path + 'skycube_'+'pixsize_'+str(logbook.final_pix_size)+'_'+str(logbook.wmin)+'-'+str(logbook.wmax)+'A'+info1+'.fits'
-    logbook.convolved_filename = args.path + 'convolved_'+args.file+'Om='+str(args.Om)+',arc='+str(args.res_arcsec)+'_'+str(logbook.wmin)+'-'+str(logbook.wmax)+'A' + info2+ args.gradtext +'.fits'
-    logbook.fitsname = args.path + 'PPV_'+args.file+'Om='+str(args.Om)+',arc='+str(args.res_arcsec)+'_'+str(logbook.wmin)+'-'+str(logbook.wmax)+'A' + info+ args.gradtext +'.fits'
-    if args.debug: print '\nDeb1023: logbook = ', logbook, '\n'
+    logbook.H2R_filename = args.path + 'H2R_'+args.file+'Om='+str(args.Om)+'_res'+str(args.res)+'kpc_'+str(logbook.wmin)+'-'+str(logbook.wmax)+'A' + info1+ args.gradtext+'.fits'
+    logbook.skynoise_cubename = args.path + 'skycube_'+str(logbook.wmin)+'-'+str(logbook.wmax)+'A'+info1+'.fits'
+    logbook.convolved_filename = args.path + 'convolved_'+args.file+'Om='+str(args.Om)+'_res'+str(args.res)+'kpc'+arc_string+'_'+str(logbook.wmin)+'-'+str(logbook.wmax)+'A' + info2+ args.gradtext +'.fits'
+    logbook.fitsname = args.path + 'PPV_'+args.file+'Om='+str(args.Om)+arc_string+'_'+str(logbook.wmin)+'-'+str(logbook.wmax)+'A' + info+ args.gradtext +'.fits'
+    logbook.fitsname_u = logbook.fitsname.replace('PPV','ERROR') # name of errorcube corresponding to PPV file to be read in       
+    logbook.fittedcube = logbook.fitsname.replace('PPV','fitted-map-cube') # name of mapcube file to be read in       
+    logbook.fittederror = logbook.fittedcube.replace('map','error')
     
+    if args.addnoise: 
+        no_noise_fitsname = logbook.fitsname[:logbook.fitsname.find('noisy')]+logbook.fitsname[logbook.fitsname.find('obs'):]    
+        FNULL=open(os.devnull,'w')
+        try:
+            wildcard = repl_wildcard(no_noise_fitsname, ['exp','real'], repl='*') #replacing the 'expXXXs' with 'exp*s' and 'realXX_' with 'real*_' so as to search for file with whatever exp time and realization but all other parameters same, bcz exp time and realization do not matter for no-noise line map
+            result = subprocess.check_output(['ls '+wildcard],stderr=FNULL, shell=1)
+            logbook.no_noise_fitsname = result.split('\n')[0]
+        except subprocess.CalledProcessError:
+            logbook.no_noise_fitsname = no_noise_fitsname
+    else:
+        logbook.no_noise_fitsname = logbook.fitsname
+    logbook.no_noise_fittedcube = logbook.no_noise_fitsname.replace('PPV','fitted-map-cube') # name of mapcube file to be read in       
+    logbook.no_noise_fittederror = logbook.no_noise_fittedcube.replace('map','error')
+
+    if args.debug: print '\nDeb1023: logbook = ', logbook, '\n'
     return args, logbook
 #-------------------------------------------------------------------------------------------
 def write_fits(filename, data, args, fill_val=np.nan):
@@ -1088,50 +2090,219 @@ def write_fits(filename, data, args, fill_val=np.nan):
     if filename[-5:] != '.fits':
         filename += '.fits'
     hdulist.writeto(filename, clobber=True)
-    if not args.silent: myprint('Written file '+filename+'\n', args)    
-#-------------------------------------------------------------------------------------------
-def rebin(map, current_res, final_res):
-    ratio = final_res/current_res
-    new_s = min(factors(np.shape(map)[0]), key=lambda x:abs(x-np.shape(map)[0]/ratio)) #to get closest factor of initial size of array to re-bin into
-    shape = (new_s, new_s)
-    sh = shape[0],map.shape[0]/shape[0],shape[1],map.shape[1]/shape[1]
-    return map.reshape(sh).sum(-1).sum(1)
+    myprint('Written file '+filename+'\n', args)    
 #------to get fraction of non zero pixels in line map above given SNR within given radius------
-def get_valid_frac(map, radius, args):
+def get_valid_frac(map, map_u, radius, args):
     x,y = np.ogrid[:np.shape(map)[0],:np.shape(map)[1]]
-    r = (x-np.shape(map)[0]/2)**2 + (y-np.shape(map)[1]/2)**2
+    dist = np.sqrt((x-np.shape(map)[0]/2)**2 + (y-np.shape(map)[1]/2)**2)
     radius = (radius/args.galsize) * np.shape(map)[0]
-    map = np.ma.masked_where(r <= radius**2, map)
-    return float(map.count())/float(np.count_nonzero(map)) #fraction
+    map = np.ma.masked_where(dist > radius, map)
+    ndatapoints = len(map.nonzero()[0])
+    map = np.ma.masked_where(map/map_u < args.SNR_thresh, map)
+    nvalid = len(map.nonzero()[0])
+    return float(nvalid)/float(ndatapoints) #fraction
 #-------------------------------------------------------------------------------------------
-def rebin_old(map, shape):
-    sh = shape[0],map.shape[0]/shape[0],shape[1],map.shape[1]/shape[1]
-    return map.reshape(sh).sum(-1).sum(1)
+def congrid(a, newdims, method='linear', centre=False, minusone=True):
+    '''Arbitrary resampling of source array to new dimension sizes.
+    Currently only supports maintaining the same number of dimensions.
+    To use 1-D arrays, first promote them to shape (x,1).
+    
+    Uses the same parameters and creates the same co-ordinate lookup points
+    as IDL''s congrid routine, which apparently originally came from a VAX/VMS
+    routine of the same name.
+
+    method:
+    neighbour - closest value from original data
+    nearest and linear - uses n x 1-D interpolations using
+                         scipy.interpolate.interp1d
+    (see Numerical Recipes for validity of use of n 1-D interpolations)
+    spline - uses ndimage.map_coordinates
+
+    centre:
+    True - interpolation points are at the centres of the bins
+    False - points are at the front edge of the bin
+
+    minusone:
+    For example- inarray.shape = (i,j) & new dimensions = (x,y)
+    False - inarray is resampled by factors of (i/x) * (j/y)
+    True - inarray is resampled by(i-1)/(x-1) * (j-1)/(y-1)
+    This prevents extrapolation one element beyond bounds of input array.
+    '''
+    if not a.dtype in [np.float64, np.float32]:
+        a = np.cast[float](a)
+
+    m1 = np.cast[int](minusone)
+    ofs = np.cast[int](centre) * 0.5
+    old = np.array( a.shape )
+    ndims = len( a.shape )
+    if len( newdims ) != ndims:
+        print "[congrid] dimensions error. " \
+              "This routine currently only support " \
+              "rebinning to the same number of dimensions."
+        return None
+    newdims = np.asarray( newdims, dtype=float )
+    dimlist = []
+
+    if method == 'neighbour':
+        for i in range( ndims ):
+            base = np.indices(newdims)[i]
+            dimlist.append( (old[i] - m1) / (newdims[i] - m1) \
+                            * (base + ofs) - ofs )
+        cd = np.array( dimlist ).round().astype(int)
+        newa = a[list( cd )]
+
+    elif method in ['nearest','linear']:
+        # calculate new dims
+        for i in range( ndims ):
+            base = np.arange( newdims[i] )
+            dimlist.append( (old[i] - m1) / (newdims[i] - m1) \
+                            * (base + ofs) - ofs )
+        # specify old dims
+        olddims = [np.arange(i, dtype = np.float) for i in list( a.shape )]
+
+        # first interpolation - for ndims = any
+        mint = si.interp1d( olddims[-1], a, kind=method )
+        newa = mint( dimlist[-1] )
+
+        trorder = [ndims - 1] + range( ndims - 1 )
+        for i in range( ndims - 2, -1, -1 ):
+            newa = newa.transpose( trorder )
+
+            mint = si.interp1d( olddims[i], newa, kind=method )
+            newa = mint( dimlist[i] )
+
+        if ndims > 1:
+            # need one more transpose to return to original dimensions
+            newa = newa.transpose( trorder )
+
+    elif method in ['spline']:
+        oslices = [ slice(0,j) for j in old ]
+        oldcoords = np.ogrid[oslices]
+        nslices = [ slice(0,j) for j in list(newdims) ]
+        newcoords = np.mgrid[nslices]
+
+        newcoords_dims = range(np.rank(newcoords))
+        #make first index last
+        newcoords_dims.append(newcoords_dims.pop(0))
+        newcoords_tr = newcoords.transpose(newcoords_dims)
+        # makes a view that affects newcoords
+
+        newcoords_tr += ofs
+
+        deltas = (np.asarray(old) - m1) / (newdims - m1)
+        newcoords_tr *= deltas
+
+        newcoords_tr -= ofs
+
+        newa = ndimage.map_coordinates(a, newcoords)
+    else:
+        print "Congrid error: Unrecognized interpolation type.\n", \
+              "Currently only \'neighbour\', \'nearest\',\'linear\',", \
+              "and \'spline\' are supported."
+        return None
+    for ind in range(len(newdims)): newa *= old[ind]/newdims[ind] #Ayan's ammendment; to keep total flux conserved.
+    return newa
+
+#-----------------------------------------------------------------
+def rebin(array, dimensions=None, scale=None):
+    """ Return the array ``array`` to the new ``dimensions`` conserving flux the flux in the bins
+    The sum of the array will remain the same
+ 
+    >>> ar = numpy.array([
+        [0,1,2],
+        [1,2,3],
+        [2,3,4]
+        ])
+    >>> rebin(ar, (2,2))
+    array([
+        [1.5, 4.5]
+        [4.5, 7.5]
+        ])
+    Raises
+    ------
+ 
+    AssertionError
+        If the totals of the input and result array don't agree, raise an error because computation may have gone wrong
+ 
+    Reference
+    =========
+    +-+-+-+
+    |1|2|3|
+    +-+-+-+
+    |4|5|6|
+    +-+-+-+
+    |7|8|9|
+    +-+-+-+
+    """
+    if dimensions is not None:
+        if isinstance(dimensions, float):
+            dimensions = [int(dimensions)] * len(array.shape)
+        elif isinstance(dimensions, int):
+            dimensions = [dimensions] * len(array.shape)
+        elif len(dimensions) != len(array.shape):
+            raise RuntimeError('')
+    elif scale is not None:
+        if isinstance(scale, float) or isinstance(scale, int):
+            dimensions = map(int, map(round, map(lambda x: x*scale, array.shape)))
+        elif len(scale) != len(array.shape):
+            raise RuntimeError('')
+    else:
+        raise RuntimeError('Incorrect parameters to rebin.\n\trebin(array, dimensions=(x,y))\n\trebin(array, scale=a')
+    if np.shape(array) == dimensions: return array #no rebinning actually needed
+    import itertools
+    #dY, dX = map(divmod, map(float, array.shape), dimensions)
+ 
+    result = np.zeros(dimensions)
+    for j, i in itertools.product(*map(xrange, array.shape)):
+        (J, dj), (I, di) = divmod(j*dimensions[0], array.shape[0]), divmod(i*dimensions[1], array.shape[1])
+        (J1, dj1), (I1, di1) = divmod(j+1, array.shape[0]/float(dimensions[0])), divmod(i+1, array.shape[1]/float(dimensions[1]))
+         
+        # Moving to new bin
+        # Is this a discrete bin?
+        dx,dy=0,0
+        if (I1-I == 0) | ((I1-I == 1) & (di1==0)):
+            dx = 1
+        else:
+            dx=1-di1
+        if (J1-J == 0) | ((J1-J == 1) & (dj1==0)):
+            dy=1
+        else:
+            dy=1-dj1
+        # Prevent it from allocating outide the array
+        I_=min(dimensions[1]-1,I+1)
+        J_=min(dimensions[0]-1,J+1)
+        result[J, I] += array[j,i]*dx*dy
+        result[J_, I] += array[j,i]*(1-dy)*dx
+        result[J, I_] += array[j,i]*dy*(1-dx)
+        result[J_, I_] += array[j,i]*(1-dx)*(1-dy)
+    allowError = 0.1
+    assert (array.sum() < result.sum() * (1+allowError)) & (array.sum() >result.sum() * (1-allowError))
+    return result
+    
 #-------------------------------------------------------------------------------------------
 def calc_dist(z, H0 = 70.):
     dist = z*c/H0 #Mpc
     return dist
 #-------------------------------------------------------------------------------------------
-def factors(n):    
-    return list(reduce(list.__add__,([i, n//i] for i in range(1, int(n**0.5) + 1) if n % i == 0)))
-#-------------------------------------------------------------------------------------------
 def masked_data(data):
     data = np.ma.masked_where(np.isnan(data), data)
-    data = np.ma.masked_where(data<=0, data)
+    #data = np.ma.masked_where(data<=0, data)
+    data = np.ma.compressed(data.flatten())
     return data
 #-------------------------------------------------------------------------------------------
 def mydiag(title, data, args):
-    myprint(title+': Mean, stdev, max, min= '+str(np.mean(masked_data(data)))+','+str(np.std(masked_data(data)))+','+\
-    str(np.max(masked_data(data)))+','+str(np.min(masked_data(data)))+'\n', args)
+    myprint(title+': Mean, median, stdev, max, min, non-zero min = '+str(np.mean(masked_data(data)))+','+str(np.median(masked_data(data)))+','+str(np.std(masked_data(data)))+','+\
+    str(np.max(masked_data(data)))+','+str(np.min(masked_data(data)))+','+str(np.min(np.ma.masked_where(data<=0, data)))+'\n', args)
 #-------------------------------------------------------------------------------------------
 def myprint(text, args):
-    if args.toscreen: print text
-    else:
-        ofile = open(args.outfile,'a')
-        ofile.write(text)
-        ofile.close()
+    if not args.silent:
+        if args.toscreen or args.debug: print text
+        else:
+            ofile = open(args.outfile,'a')
+            ofile.write(text)
+            ofile.close()
 #-------------------------------------------------------------------------------------------
-def myexit(text, args):
+def myexit(args, text=''):
     myprint(text+' Exiting by encountering sys.exit() in the code.', args)
     sys.exit()
 #-------------------End of functions------------------------------------------------------------------------
@@ -1145,7 +2316,6 @@ planck = 6.626e-27 #ergs.sec Planck's constant
 nu = 5e14 #Hz H-alpha frequency to compute photon energy approximately
 f_esc = 0.0
 f_dust = 0.0
-const = 1e0 #to multiply with nebular flux to make it comparable with SB continuum
 if __name__ == '__main__':
     properties = ap.Namespace()
     #-------------------arguments parsed-------------------------------------------------------
@@ -1161,6 +2331,10 @@ if __name__ == '__main__':
     parser.set_defaults(map=False)
     parser.add_argument('--sfr', dest='sfr', action='store_true')
     parser.set_defaults(sfr=False)
+    parser.add_argument('--fixfit', dest='fixfit', action='store_true')
+    parser.set_defaults(fixfit=False)
+    parser.add_argument('--fixcont', dest='fixcont', action='store_true')
+    parser.set_defaults(fixcont=False)
     parser.add_argument('--met', dest='met', action='store_true')
     parser.set_defaults(met=False)
     parser.add_argument('--getmap', dest='getmap', action='store_true')
@@ -1207,8 +2381,37 @@ if __name__ == '__main__':
     parser.set_defaults(debug=False)
     parser.add_argument('--showplot', dest='showplot', action='store_true')
     parser.set_defaults(showplot=False) #to show spectrum fitting plot
+    parser.add_argument('--nomap', dest='nomap', action='store_true')
+    parser.set_defaults(nomap=False)
+    parser.add_argument('--showerr', dest='showerr', action='store_true')
+    parser.set_defaults(showerr=False)
+    parser.add_argument('--noskynoise', dest='noskynoise', action='store_true')
+    parser.set_defaults(noskynoise=False)
+    parser.add_argument('--showcoord', dest='showcoord', action='store_true')
+    parser.set_defaults(showcoord=False)
+    parser.add_argument('--nocreate', dest='nocreate', action='store_true')
+    parser.set_defaults(nocreate=False)
+    parser.add_argument('--snrmap', dest='snrmap', action='store_true')
+    parser.set_defaults(snrmap=False)
+    parser.add_argument('--snrhist', dest='snrhist', action='store_true')
+    parser.set_defaults(snrhist=False)
+    parser.add_argument('--binback', dest='binback', action='store_true')
+    parser.set_defaults(binback=False)
+    parser.add_argument('--showbin', dest='showbin', action='store_true')
+    parser.set_defaults(showbin=False)
+    parser.add_argument('--fitbin', dest='fitbin', action='store_true')
+    parser.set_defaults(fitbin=False)
+    parser.add_argument('--noweight', dest='noweight', action='store_true')
+    parser.set_defaults(noweight=False)
+    parser.add_argument('--show_annulus', dest='show_annulus', action='store_true')
+    parser.set_defaults(show_annulus=False)
+    parser.add_argument('--nooutlier', dest='nooutlier', action='store_true')
+    parser.set_defaults(nooutlier=False)
+    parser.add_argument('--contsub', dest='contsub', action='store_true')
+    parser.set_defaults(contsub=False)
 
     parser.add_argument('--scale_exptime')
+    parser.add_argument('--scale_exp_SNR')
     parser.add_argument('--multi_realisation')
     parser.add_argument("--path")
     parser.add_argument("--outfile")
@@ -1217,10 +2420,12 @@ if __name__ == '__main__':
     parser.add_argument("--line")
     parser.add_argument("--ppb")
     parser.add_argument("--z")
+    parser.add_argument("--base_res")
     parser.add_argument("--res")
     parser.add_argument("--arc")
     parser.add_argument("--nhr")
     parser.add_argument("--nbin")
+    parser.add_argument("--nres")
     parser.add_argument("--vdisp")
     parser.add_argument("--vdel")
     parser.add_argument("--vres")
@@ -1232,6 +2437,8 @@ if __name__ == '__main__':
     parser.add_argument("--wmax")
     parser.add_argument("--cmin")
     parser.add_argument("--cmax")
+    parser.add_argument("--snr_cmin")
+    parser.add_argument("--snr_cmax")
     parser.add_argument("--rad")
     parser.add_argument("--gain")
     parser.add_argument("--exptime")
@@ -1239,15 +2446,23 @@ if __name__ == '__main__':
     parser.add_argument("--snr")
     parser.add_argument("--Zgrad")
     parser.add_argument("--fixed_SNR")
+    parser.add_argument("--fixed_noise")
     parser.add_argument("--ncores")
     parser.add_argument("--galsize")
     parser.add_argument("--outtag")
+    parser.add_argument("--oneHII")
+    parser.add_argument("--vmask")
+    parser.add_argument("--scale_length")
+    parser.add_argument("--xcenter_offset")
+    parser.add_argument("--ycenter_offset")
+    parser.add_argument("--binto")
+    parser.add_argument("--fitupto") #in units of args.scale_length
+    parser.add_argument("--choice") #color coding of metallicity gradient plot
     args, leftovers = parser.parse_known_args()
     if args.debug: #debug mode over-rides 
         args.toscreen = True
         args.silent = False
         args.hide = False
-        args.inspect = True
         args.calcgradient = True
         args.nowrite = True
         args.saveplot = False
@@ -1273,9 +2488,9 @@ if __name__ == '__main__':
         args.Om = 0.5
 
     if args.ppb is not None:
-        args.pix_per_beam = int(args.ppb)
+        args.pix_per_beam = float(args.ppb)
     else:
-        args.pix_per_beam = 10
+        args.pix_per_beam = 6.
 
     if args.gain is not None:
         args.gain = float(args.gain)
@@ -1285,7 +2500,7 @@ if __name__ == '__main__':
     if args.epp is not None:
         args.el_per_phot = float(args.epp)
     else:
-        args.el_per_phot = 1.
+        args.el_per_phot = 0.5 #instrumental throughput, not all photons get converted to electrons
 
     if args.z is not None:
         args.z = float(args.z)
@@ -1304,20 +2519,30 @@ if __name__ == '__main__':
         myprint('Deb1273: Flux ratio= (Radius= %.2F / (2 * dist= %.4E * 3.086e22))^2'%(args.rad, properties.dist), args)
         myprint('Deb1274: Flux ratio= %.4E'%properties.flux_ratio, args)
 
+    if args.base_res is not None:
+        args.base_res = float(args.base_res)
+    else:
+        args.base_res = 0.02 #kpc: simulation actual base resolution, for NG's Enzo sim base_res = 20pc
+    
     if args.res is not None:
         args.res = float(args.res)
     else:
-        args.res = 0.02 #kpc: simulation actual resolution 
+        args.res = args.base_res #kpc: input resolution to constructPPV cube, usually same as base resolution of simulation 
     
     if args.arc is not None:
         args.res_arcsec = float(args.arc)
+        if args.res_arcsec < 0:
+            args.pix_per_beam = 0.001 #to convolve with an extremely small beam -> limiting case to no convolution
+            required_res_phys = args.res * args.pix_per_beam #physical resolution that 0.01 pixel corresponds to, so that no rebinning needs to be done before convolution
+            args.res_arcsec = required_res_phys*(3600*180)/(properties.dist*1e3*np.pi) #back-calculating res in arcsec such that properties.res_phys = required_res_phys
+            args.binto = None #no resampling after convolution
     else:
         args.res_arcsec = 0.5 #arcsec
     
     properties.res_phys = args.res_arcsec*np.pi/(3600*180)*(properties.dist*1e3) #kpc
 
     if args.line is None:
-        args.line = 'OIII5007'# #whose emission map to be made
+        args.line = 'H6562'# #whose emission map to be made
 
     if args.cmin is not None:
         args.cmin = float(args.cmin)
@@ -1329,6 +2554,16 @@ if __name__ == '__main__':
     else:
         args.cmax = None
 
+    if args.snr_cmin is not None:
+        args.snr_cmin = float(args.snr_cmin)
+    else:
+        args.snr_cmin = None
+
+    if args.snr_cmax is not None:
+        args.snr_cmax = float(args.snr_cmax)
+    else:
+        args.snr_cmax = None
+
     if args.nhr is not None:
         args.nhr = int(args.nhr)
     else:
@@ -1339,21 +2574,26 @@ if __name__ == '__main__':
     else:
         args.nbin = 1000 #no. of bins used to bin the continuum into (without lines)
 
+    if args.nres is not None:
+        args.nres = int(args.nres)
+    else:
+        args.nres = 10 #no. of spectral resolution elements included on either side during fitting a line/group of lines
+
     if args.vdisp is not None:
         args.vdisp = float(args.vdisp)
     else:
-        args.vdisp = 15 #km/s vel dispersion to be added to emission lines from MAPPINGS while making PPV
+        args.vdisp = 15. #km/s vel dispersion to be added to emission lines from MAPPINGS while making PPV
 
     if args.vdel is not None:
         args.vdel = float(args.vdel)
     else:
-        args.vdel = 100 #km/s; vel range in which spectral resolution is higher is sig = 5*vdel/c
+        args.vdel = 100. #km/s; vel range in which spectral resolution is higher is sig = 5*vdel/c
                     #so wavelength range of +/- sig around central wavelength of line is binned into further nhr bins
 
     if args.vres is not None:
         args.vres = float(args.vres)
     else:
-        args.vres = 30 #km/s instrumental vel resolution to be considered while making PPV
+        args.vres = 30. #km/s instrumental vel resolution to be considered while making PPV
 
     if args.wmin is not None:
         args.wmin = float(args.wmin)
@@ -1395,23 +2635,65 @@ if __name__ == '__main__':
         args.fixed_SNR = float(args.fixed_SNR) #fixed SNR used in makenoisy() function
     else:
         args.fixed_SNR = None 
+        
+    if args.fixed_noise is not None:
+        args.fixed_noise = float(args.fixed_noise) #fixed SNR used in makenoisy() function
+    else:
+        args.fixed_noise = None 
 
     if args.ncores is not None:
         args.ncores = int(args.ncores) #number of cores used in parallel segments
     else:
         args.ncores = mp.cpu_count()/2
 
+    if args.oneHII is not None:
+        args.oneHII = int(args.oneHII) #serial no. of HII region to be used for the one HII region test case
+    else:
+        args.oneHII = None 
+
+    if args.vmask is not None:
+        args.vmask = float(args.vmask) #vel width to mask around nebular lines, before continuum fitting
+    else:
+        args.vmask = 100. #km/s 
+
+    if args.useKD:
+        args.num_arr = [['NII6584']]
+        args.den_arr = [['OII3727', 'OII3729']]
+        args.ratio_lim = [(0,2)]
+    else:
+        args.num_arr = [['NII6584'], ['NII6584']]
+        args.den_arr = [['SII6717', 'SII6730'], ['H6562']]
+        args.ratio_lim = [(0,2), (0,0.5)]
+
+    if args.scale_length is not None:
+        args.scale_length = float(args.scale_length) #scale_length of the disk galaxy
+    else:
+        args.scale_length = 4. #kpc 
+
+    if args.xcenter_offset is not None:
+        args.xcenter_offset = float(args.xcenter_offset) #x coordinate of center of galaxy (in kpc), tp take into account any offset from centre of FoV
+    else:
+        args.xcenter_offset = 2. #kpc 
+
+    if args.ycenter_offset is not None:
+        args.ycenter_offset = float(args.ycenter_offset) #x coordinate of center of galaxy (in kpc), tp take into account any offset from centre of FoV
+    else:
+        args.ycenter_offset = 2. #kpc 
+
     #-------------------------------------------------------------------------------------------
     args, logbook = getfitsname(args, properties) # name of fits file to be written into
     #-------------------------------------------------------------------------------------------
     if args.outfile is None:
-        args.outfile = args.path + 'output_'+logbook.fitsname[:-5]+'.txt' # name of fits file to be written into
+        args.outfile = logbook.fitsname.replace('PPV','output_PPV')[:-5]+'.txt' # name of fits file to be written into
     #------------write starting conditions in output txt file or stdout-------------
     starting_text = ''
     if not len(sys.argv) > 1:
         starting_text += 'Insuffiecient information. Here is an example how to this routine might be called:\n'
         starting_text += 'run plotobservables.py --addnoise --smooth --keep --vres 600 --spec_smear --plotspec\n'
     else:
+        if float(args.arc)<0: starting_text += 'Input arcsec < 0 i.e. limit of no convolution. Hence convolving with tiny beam of '+str(args.pix_per_beam)+\
+' pixels. Avoiding pre-convolution binning, that corresponds to phys_res = '+str(required_res_phys)+' kpc and requires \
+arcsec = '+str(args.res_arcsec)+'". Also setting no resampling after convolution.'+'\n'
         starting_text += 'Path: '+args.path+' Use --path option to specify.'+'\n'
         starting_text += 'Outfile: '+args.outfile+' Use --outfile option to specify.'+'\n'
         starting_text += 'Simulation= '+args.file+'. Use --file option to specify.'+'\n'
@@ -1451,52 +2733,64 @@ if __name__ == '__main__':
         starting_text += 'Will be using/creating '+logbook.skynoise_cubename+' file.'+'\n'
         starting_text += 'Will be using/creating '+logbook.convolved_filename+' file.'+'\n'
         starting_text += 'Will be using/creating '+logbook.fitsname+' file.'+'\n'
-    
+
     myprint(starting_text, args)
     #-------------------------------------------------------------------------------------------------------
-    logbook.fittedcube = logbook.fitsname.replace('PPV','fitted-map-cube') # name of mapcube file to be read in       
     logbook.s = ascii.read(getfn(args), comment='#', guess=False)
-    if args.toscreen: print 'Deb1432: res_phys, final pix per beam, final pix size, final shape=', properties.res_phys, logbook.fwhm, logbook.final_pix_size, args.galsize/logbook.final_pix_size, 'kpc' #
+    initial_nh2r = len(logbook.s)
+    if args.nooutlier: logbook.s = logbook.s[(logbook.s['nII'] >= 10**(5.2-4+6)) & (logbook.s['nII'] <= 10**(6.7-4+6))] #D16 models have 5.2 < lpok < 6.7 #DD600_lgf with Zgrad8.77,-0.1 has 4.3 < lpok < 8
+    myprint('Reading in '+str(len(logbook.s))+' out of '+str(initial_nh2r)+' HII regions.\n', args)
+    if args.toscreen:
+        print 'Deb1432: starting shape, intended res_phy, final pix size, final shape=', args.galsize/args.res, properties.res_phys, logbook.final_pix_size, 'kpc', args.galsize/logbook.final_pix_size #
+        if args.smooth: print 'Deb1433:  final pix per beam to smooth, final pix per beam sampled, intermediate pix size, binning factor, intermediate shape=', logbook.fwhm, properties.res_phys/logbook.final_pix_size, logbook.intermediate_pix_size, 'kpc', logbook.intermediate_pix_size/args.res, args.galsize/logbook.intermediate_pix_size
+    #sys.exit() #
     if args.debug: mydiag('Deb1437: for H2R Ha luminosity: in ergs/s:', logbook.s['H6562'], args)
     #-----------------------jobs fetched--------------------------------------------------------------------
     if args.get_scale_length: properties.scale_length = get_scale_length(args, logbook)
+    elif args.inspect and not args.met: axes = inspectmap(args, logbook, properties)
     elif args.ppv: properties.ppvcube = spec(args, logbook, properties)       
     else:
-        if not os.path.exists(logbook.fitsname):
-            if not args.silent: myprint('PPV file does not exist. Creating ppvcube..'+'\n', args)
-            properties.ppvcube = spec(args, logbook, properties)       
-            write_fits(logbook.fitsname, properties.ppvcube, args, fill_val=np.nan)        
-        else:
-            if not args.silent: myprint('Reading existing ppvcube from '+logbook.fitsname+'\n', args)
+        if os.path.exists(logbook.fitsname):
+            myprint('Reading existing ppvcube from '+logbook.fitsname+'\n', args)
             properties.ppvcube = fits.open(logbook.fitsname)[0].data
+            if not os.path.exists(logbook.fitsname_u):
+                if not args.nocreate: properties.ppvcube = spec(args, logbook, properties)
+                else: myexit(args, text='ERROR file does not exist and not creating it. Just exiting.'+'\n')
+            properties.ppvcube_u = fits.open(logbook.fitsname_u)[0].data
+        elif not args.nocreate:
+            myprint('PPV file does not exist. Creating ppvcube..'+'\n', args)
+            properties.ppvcube = spec(args, logbook, properties)
+        else: myexit(args, text='PPV file does not exist and not creating it. Just exiting.'+'\n')
+        
         properties = get_disp_array(args, logbook, properties)
-    
-        if args.plotintegmap or args.plotspec:
+        
+        if  (not args.plotintegmap) * (not args.plotspec) * (not args.fixfit) * (not args.fixcont) == 0:
             if args.X is not None:
-                args.X = float(args.X)
+                args.X = int(args.X)
             else:
-                args.X = np.shape(properties.ppvcube)[0]/2 #p-p values at which point to extract spectrum from the ppv cube
-            if args.plotspec and not args.silent: myprint('X position at which spectrum to be plotted= '+str(X)+'\n', args)
+                args.X = int(logbook.s['x'][args.oneHII]*0.02/args.res) if args.oneHII is not None else int(args.galsize/logbook.final_pix_size)/2 #p-p values at which point to extract spectrum from the ppv cube
+            if args.plotspec and not args.silent: myprint('X position at which spectrum to be plotted= '+str(args.X)+'\n', args)
 
             if args.Y is not None:
-                args.Y = float(args.Y)
+                args.Y = int(args.Y)
             else:
-                args.Y = np.shape(properties.ppvcube)[0]/2 #p-p values at which point to extract spectrum from the ppv cube
-            if args.plotspec and not args.silent: myprint('Y position at which spectrum to be plotted= '+str(Y)+'\n', args)
+                args.Y = int(logbook.s['y'][args.oneHII]*0.02/args.res) if args.oneHII is not None else int(args.galsize/logbook.final_pix_size)/2 #p-p values at which point to extract spectrum from the ppv cube
+            if args.plotspec and not args.silent: myprint('Y position at which spectrum to be plotted= '+str(args.Y)+'\n', args)
             
             if args.plotintegmap:
                 dummy = plotintegmap(args, logbook, properties)
             elif args.plotspec:
                 dummy = spec_at_point(args, logbook, properties)
-    
+            elif args.fixfit or args.fixcont:
+                dummy, dummy_u = fixfit(args, logbook, properties)
+
         else:
-            logbook.fittederror = logbook.fittedcube.replace('map','error')
             if os.path.exists(logbook.fittedcube) and not args.clobber:
-                if not args.silent: myprint('Reading existing mapcube from '+logbook.fittedcube+'\n', args)
-            else:
-                if not args.silent: myprint('Mapfile does not exist. Creating mapcube..'+'\n', args)
+                myprint('Reading existing mapcube from '+logbook.fittedcube+'\n', args)
+            elif not args.nocreate:
+                myprint('Mapfile does not exist. Creating mapcube..'+'\n', args)
                 
-                if args.spec_smear: smear = ' --spec_smear '
+                if args.spec_smear: smear = ' --spec_smear'
                 else: smear = ''
                 if args.silent: silent = ' --silent'
                 else: silent = ''
@@ -1506,31 +2800,40 @@ if __name__ == '__main__':
                 else: debug = ''
                 if args.showplot: showplot = ' --showplot'
                 else: showplot = ''
+                if args.oneHII is not None: oneHII = ' --oneHII '+str(args.oneHII)
+                else: oneHII = ''
+                if args.addnoise: addnoise = ' --addnoise'
+                else: addnoise = ''
+                if args.contsub: contsub = ' --contsub'
+                else: contsub = ''
                 
-                funcname = HOME+'/models/enzo_model_code/parallel_fitting.py'
-                command = 'mpirun -np '+str(args.ncores)+' python '+funcname+' --parallel --fitsname '+logbook.fitsname+' --nbin '+str(args.nbin)+\
+                funcname = HOME+'/Work/astro/ayan_codes/enzo_model_code/parallel_fitting_old.py'
+                command = 'mpirun -np '+str(args.ncores)+' python '+funcname+' --fitsname '+logbook.fitsname+\
+                ' --no_noise_fitsname '+logbook.no_noise_fitsname+' --fitsname_u '+logbook.fitsname_u+' --nbin '+str(args.nbin)+\
                 ' --vdel '+str(args.vdel)+' --vdisp '+str(args.vdisp)+' --vres '+str(args.vres)+' --nhr '+str(args.nhr)+' --wmin '+\
                 str(logbook.wmin)+' --wmax '+str(logbook.wmax)+' --fittedcube '+logbook.fittedcube+' --fittederror '+logbook.fittederror+\
-                ' --outfile '+args.outfile + smear + silent + toscreen + debug + showplot
+                ' --outfile '+args.outfile+' --nres '+str(args.nres) + ' --vmask ' +str(args.vmask) + smear + silent + toscreen \
+                + debug + showplot + oneHII + addnoise + contsub
                 subprocess.call([command],shell=True)
-                
+            else:
+                myprint('Mapfile does not exist and not creating it. Just exiting.'+'\n', args)
+                sys.exit()
+            
             properties.mapcube = fits.open(logbook.fittedcube)[0].data
-            if args.SNR_thresh is not None: properties.errorcube = fits.open(logbook.fittederror)[0].data
-            else: properties.errorcube = None
+            properties.errorcube = fits.open(logbook.fittederror)[0].data
             
             if args.bptpix: 
                 bpt_pixelwise(args, logbook, properties)
             elif args.met: 
-                properties = metallicity(args, logbook, properties)
+                properties, axes = metallicity(args, logbook, properties)
+                if args.inspect: inspectmap(args, logbook, properties, axes=axes)
             elif args.map: 
                 properties.map = emissionmap(args, logbook, properties)
             elif args.sfr: 
                 properties.SFRmap_real, properties.SFRmapHa = SFRmaps(args, logbook, properties)
             else: 
-                if not args.silent: myprint('Wrong choice. Choose from:\n --bptpix, --map, --sfr, --met, --ppv, --plotinteg, --plotspec'+'\n', args)
+                myprint('Wrong choice. Choose from:\n --bptpix, --map, --sfr, --met, --ppv, --plotinteg, --plotspec'+'\n', args)
         
-            if args.inspect:
-                inspectmap(args, logbook, properties)
     #-------------------------------------------------------------------------------------------
     if args.hide: plt.close()
     else: plt.show(block=False)
