@@ -188,12 +188,12 @@ def bpt_pixelwise(args, logbook, properties):
 for Omega = ' + str(args.Om) + ', resolution = ' + str(args.res) + ' kpc' + info
     plt.scatter((np.log10(mapn2ha)).flatten(), (np.log10(mapo3hb)).flatten(), s=4, c=d.flatten(), lw=0, vmin=0,
                 vmax=args.galsize / 2)
-    plt.title(t)
+    if not args.saveplot: plt.title(t)
     cb = plt.colorbar()
     # cb.ax.set_yticklabels(str(res*float(x.get_text())) for x in cb.ax.get_yticklabels())
     cb.set_label('Galactocentric distance (in kpc)')
     if args.saveplot:
-        fig.savefig(path + t + '.png')
+        fig.savefig(args.path + t + '.eps')
 
 
 # -------------------------------------------------------------------------------------------
@@ -246,7 +246,8 @@ def meshplot3D(x, y, args):
             plt.plot(x[i, j, :], y[i, j, :], c='black', lw=0.5)
             # plt.pause(1) #
 
-    plt.title('MAPPINGS grid of models')
+    if not args.saveplot: plt.title('MAPPINGS grid of models')
+    else: fig.savefig(args.path + t + '.eps')
 
 
 # -------------------------------------------------------------------------------------------
@@ -338,7 +339,8 @@ def get_scale_length(args, logbook):
         plt.ylabel(ylab)
         plt.xlim(0, args.galsize / 2)
         plt.legend(bbox_to_anchor=(0.9, 0.42), bbox_transform=plt.gcf().transFigure)
-        plt.title('Measuring star formation scale length')
+        if not args.saveplot: plt.title('Measuring star formation scale length')
+        else: fig.savefig(args.path + args.file+'_scale_length.eps')
         plt.show(block=False)
 
     output = 'Scale length from Halpha map = ' + str(scale_length) + ' kpc, and ' + str(
@@ -508,22 +510,27 @@ def metallicity(args, logbook, properties):
     else:
         nrow, ncol, figsize = int(np.ceil(float(nplots / 3))), min(nplots, 3), (12, 8)
 
-    fig, axes = plt.subplots(nrow, ncol, sharex=True, figsize=figsize)
-    fig.subplots_adjust(hspace=0.1, wspace=0.25, top=0.9, bottom=0.1, left=0.07, right=0.98)
+    if not args.hide:
+        fig, axes = plt.subplots(nrow, ncol, sharex=True, figsize=figsize)
+        fig.subplots_adjust(hspace=0.1, wspace=0.25, top=0.9, bottom=0.1, left=0.07, right=0.98)
+    else:
+        fig, axes = 0, 0 #dummy variables for function to return to caller
 
     map_num, map_num_u, map_den, map_den_u = [], [], [], []
     plot_index, already_plotted = 0, []
 
     for num_grp in args.num_arr:
         log_fluxmin, log_fluxmax = 0, -100
-        if args.inspect: ax = axes[plot_index / ncol][plot_index % ncol]
         map_num_grp, map_num_grp_u = [], []
         if not iterable(num_grp): num_grp = [num_grp]
-        if num_grp not in already_plotted:
-            plot = True
-            already_plotted.append(num_grp)
-        else:
-            plot = False
+        if not args.hide:
+            if args.inspect: ax = axes[plot_index / ncol][plot_index % ncol]
+            if num_grp not in already_plotted:
+                plot = True
+                already_plotted.append(num_grp)
+            else:
+                plot = False
+        
         for (jj, num) in enumerate(num_grp):
 
             temp_u = properties.errorcube[:, :, np.where(logbook.llist == num)[0][0]] * (
@@ -534,7 +541,7 @@ def metallicity(args, logbook, properties):
             temp = properties.mapcube[:, :, np.where(logbook.llist == num)[0][0]] * (logbook.final_pix_size * 1e3) ** 2
             temp = np.ma.masked_where(temp <= 0., temp)
             if args.SNR_thresh is not None: temp = np.ma.masked_where(temp / temp_u < args.SNR_thresh, temp)
-            if plot and args.inspect:
+            if not args.hide and plot and args.inspect:
                 myprint('fitted: ' + num + ' max= ' + str(np.max(temp)) + ', min= ' + str(
                     np.min(temp)) + ', integrated= ' + str(np.sum(temp * (args.galsize * 1000. / g) ** 2)), args)
                 myprint('error: ' + num + ' max= ' + str(np.max(temp_u)) + ', min= ' + str(
@@ -552,21 +559,22 @@ def metallicity(args, logbook, properties):
             map_num_grp.append(temp)
         map_num.append(map_num_grp)
         map_num_u.append(map_num_grp_u)
-        if plot and args.inspect:
+        if not args.hide and plot and args.inspect:
             ax.set_ylabel('log(' + ','.join(num_grp) + ')')
             if not args.inspect: ax.set_ylim(log_fluxmin, log_fluxmax)
             plot_index += 1
 
     for den_grp in args.den_arr:
         log_fluxmin, log_fluxmax = 0, -100
-        if args.inspect: ax = axes[plot_index / ncol][plot_index % ncol]
         map_den_grp, map_den_grp_u = [], []
         if not iterable(den_grp): den_grp = [den_grp]
-        if den_grp not in already_plotted:
-            plot = True
-            already_plotted.append(den_grp)
-        else:
-            plot = False
+        if not args.hide:
+            if args.inspect: ax = axes[plot_index / ncol][plot_index % ncol]
+            if den_grp not in already_plotted:
+                plot = True
+                already_plotted.append(den_grp)
+            else:
+                plot = False
         for (jj, den) in enumerate(den_grp):
 
             temp_u = properties.errorcube[:, :, np.where(logbook.llist == den)[0][0]] * (
@@ -577,7 +585,7 @@ def metallicity(args, logbook, properties):
             temp = properties.mapcube[:, :, np.where(logbook.llist == den)[0][0]] * (logbook.final_pix_size * 1e3) ** 2
             temp = np.ma.masked_where(temp <= 0., temp)
             if args.SNR_thresh is not None: temp = np.ma.masked_where(temp / temp_u < args.SNR_thresh, temp)
-            if plot and args.inspect:
+            if not args.hide and plot and args.inspect:
                 myprint('fitted: ' + den + ' max= ' + str(np.max(temp)) + ', min= ' + str(
                     np.min(temp)) + ', integrated= ' + str(np.sum(temp * (args.galsize * 1000. / g) ** 2)), args)
                 myprint('error: ' + den + ' max= ' + str(np.max(temp_u)) + ', min= ' + str(
@@ -595,7 +603,7 @@ def metallicity(args, logbook, properties):
             map_den_grp.append(temp)
         map_den.append(map_den_grp)
         map_den_u.append(map_den_grp_u)
-        if plot and args.inspect:
+        if not args.hide and plot and args.inspect:
             ax.set_ylabel('log(' + ','.join(den_grp) + ')')
             ax.set_ylim(log_fluxmin, log_fluxmax)
             plot_index += 1
@@ -628,7 +636,7 @@ def metallicity(args, logbook, properties):
         myprint('Z_u_list after conversion med, mean, min ' + str(np.median(Z_u_list)) + ' ' + str(
             np.mean(Z_u_list)) + ' ' + str(np.min(Z_u_list)) + '\n', args)
 
-    if not args.inspect:
+    if not args.inspect and not args.hide:
         choice = int(args.choice) if args.choice is not None else 0
 
         if choice == 0:
@@ -752,11 +760,9 @@ def metallicity(args, logbook, properties):
                 np.poly1d((args.logOHgrad, args.logOHcen))(np.arange(args.galsize / 2)) - logOHsol,
                 c='k' if args.inspect else 'r', label='True gradient slope=' + str('%.4F' % args.logOHgrad))
         ax.axhline(0, c='k', linestyle='--', label='Zsol')  # line for solar metallicity
-        if args.saveplot:
-            fig.savefig(path + t + '.png')
-        if args.getmap: dummy = plotmap(logOHobj_map, t + '_fitted', 'Metallicity', 'log(Z/Z_sol)', args, logbook,
+        if args.getmap: dummy = plotmap(logOHobj_map, t + '_fitted', logbook.fitsname[:-5]+'_Metallicity', 'log(Z/Z_sol)', args, logbook,
                                         makelog=False, addcircle_radius=args.scale_length)
-    # ---to compute apparent gradient and scatter---
+# ---to compute apparent gradient and scatter---
     if args.calcgradient:
         myprint('Fitting gradient..' + '\n', args)
         myprint('Deb513: No. of pixels being considered for gradient fit = ' + str(len(Z_list)) + '\n', args)
@@ -839,6 +845,10 @@ intercept       intercept_u       exptime       snr_cut         realisation\n'
                     ax.text(0.08, met_maxlim - 0.35,
                             'Inferred interecept= %.4F +/- %.4F' % (properties.logOHcen, np.sqrt(linecov[1][1])),
                             va='top', color='k', fontsize=10)
+
+    if args.saveplot and not args.hide:
+        fig.savefig(args.path + t + '.eps')
+        print 'Saved file ' + args.path + t + '.eps' #
 
     return properties, axes
 
@@ -966,7 +976,7 @@ def fit_all_lines(args, logbook, wave, flam, flam_u, cont, pix_i, pix_j, z=0, z_
                     wave_short_single = wave[(leftlim < wave) & (wave < rightlim)]
                     cont_short_single = cont[(leftlim < wave) & (wave < rightlim)]
                     plt.plot(wave_short_single, su.gaus(wave_short_single, 1, *popt_single) * scaling, lw=1, c='r')
-                    # plt.scatter(wave_short_single, su.gaus(wave_short_single,1, *popt_single)*cont_short_single,lw=0, c='r', s=10)
+                    plt.scatter(wave_short_single, su.gaus(wave_short_single,1, *popt_single)*cont_short_single,lw=0, c='r', s=10)
             if args.showplot:
                 if count > 1: plt.plot(wave_short, undo_contnorm(su.gaus(wave_short, count, *popt), cont_short,
                                                                  contsub=args.contsub), lw=2, c='g')
@@ -1021,7 +1031,7 @@ def emissionmap(args, logbook, properties):
     map_u = properties.errorcube[:, :, np.where(logbook.llist == args.line)[0][0]]
     if args.SNR_thresh is not None: map = np.ma.masked_where(map / map_u < args.SNR_thresh, map)
     t = args.line + '_map:\n' + logbook.fitsname
-    dummy = plotmap(map, t, args.line, 'Log ' + args.line + ' surface brightness in erg/s/pc^2', args, logbook,
+    dummy = plotmap(map, t, logbook.fitsname[:-5]+'_'+args.line + '_map', 'Log ' + args.line + ' surface brightness in erg/s/pc^2', args, logbook,
                     addcircle_radius=args.scale_length)
 
     if args.snrmap:
@@ -1041,7 +1051,7 @@ def emissionmap(args, logbook, properties):
             if args.cmax is not None: snr_map = np.ma.masked_where(np.log10(map) > args.cmax, snr_map)
             plt.hist(np.ma.compressed(snr_map.flatten()), bins=100, range=(0, 1000))
         # dummy = plotmap(snr_map, args.line+' SNR map', 'junk', 'log(SNR)', args, logbook, makelog=True, addcircle_radius=args.scale_length, issnrmap=True)
-        dummy = plotmap(snr_map, args.line + ' SNR map', 'junk', 'SNR', args, logbook, makelog=False,
+        dummy = plotmap(snr_map, args.line + '_SNRmap', logbook.fitsname[:-5]+'_'+args.line + '_SNRmap', 'SNR', args, logbook, makelog=False,\
                         addcircle_radius=args.scale_length, issnrmap=True)
 
     dr = 0.1
@@ -1082,17 +1092,13 @@ def SFRmaps(args, logbook, properties):
     t = title(args.file) + 'SFR map for Omega = ' + str(args.Om) + ', resolution = ' + str(
         logbook.final_pix_size) + ' kpc' + info
     if args.getmap:
-        # SFRmapQ0 = plotmap(SFRmapQ0, t, 'SFRmapQ0', 'Log SFR(Q0) density in Msun/yr/pc^2', args, logbook)
         SFRmap_real = plotmap(SFRmap_real, t, 'SFRmap_real', 'Log SFR(real) density in Msun/yr/pc^2', args, logbook)
         SFRmapHa = plotmap(SFRmapHa, t, 'SFRmapHa', 'Log SFR(Ha) density in Msun/yr/pc^2', galsize, args, logbook)
-        # SFRmap_comp = plotmap(SFRmap_comp, t, 'Log SFR(Q0)/SFR(real) in Msun/yr/pc^2', args, logbook, makelog=False)
     else:
         fig = plt.figure(figsize=(8, 6))
         fig.subplots_adjust(hspace=0.7, top=0.9, bottom=0.1, left=0.1, right=0.95)
         ax = plt.subplot(111)
-        # ax.scatter((np.log10(SFRmap_real)).flatten(),(np.log10(SFRmapQ0)).flatten(), s=4, c='r', lw=0, label='SFR(Q0)')
         ax.scatter((np.log10(SFRmap_real)).flatten(), (np.log10(SFRmapHa)).flatten(), s=4, c='b', lw=0, label='SFR(Ha)')
-        # ax.scatter((np.log10(SFRmap_real)).flatten(),(np.log10(SFRmapHa)).flatten(), s=4, c=col_ar[i], lw=0, label=str(res_phys))
         # ax.scatter((np.log10(SFRmap_real)).flatten(),(np.log10(SFRmapHa)).flatten(), s=4, c=d.flatten(), lw=0, label='SFR(Ha)')
         # -----to plot x=y line----------#
         lims = [min(ax.get_xlim()[0], ax.get_ylim()[0]), max(ax.get_xlim()[1], ax.get_ylim()[1])]
@@ -1103,11 +1109,11 @@ def SFRmaps(args, logbook, properties):
         t = 'SFR comparison for ' + args.file + ', res ' + str(logbook.final_pix_size) + ' kpc' + info
         plt.ylabel('Log (Predicted SFR density) in Msun/yr/pc^2')
         plt.xlabel('Log (Actual SFR density) in Msun/yr/pc^2')
-        plt.title(t)
+        if not args.saveplot: plt.title(t)
         # plt.colorbar().set_label('Galactocentric distance (in pix)')
         plt.legend(bbox_to_anchor=(0.35, 0.88), bbox_transform=plt.gcf().transFigure)
         if saveplot:
-            fig.savefig(args.path + title(args.file)[:-2] + '_' + t + '.png')
+            fig.savefig(args.path + title(args.file)[:-2] + '_' + t + '.eps')
         '''
         ax.scatter(reso,mean,s=4)
         plt.xlabel('res(kpc)')
@@ -1145,7 +1151,7 @@ def spec_at_point(args, logbook, properties):
     cbarlab = 'Log surface brightness in erg/s/pc^2'  # label of color bar
     plt.plot(properties.dispsol, np.log10(properties.ppvcube[args.X][args.Y][:]), lw=1, c='b')
     t = 'Spectrum at pp ' + str(args.X) + ',' + str(args.Y) + ' for ' + logbook.fitsname
-    plt.title(t)
+    if not args.saveplot: plt.title(t)
     plt.ylabel(cbarlab)
     plt.xlabel('Wavelength (A)')
     plt.ylim(30, 37)
@@ -1153,7 +1159,7 @@ def spec_at_point(args, logbook, properties):
     if not args.hide:
         plt.show(block=False)
     if args.saveplot:
-        fig.savefig(path + t + '.png')
+        fig.savefig(path + t + '.eps')
 
 
 # -------------------------------------------------------------------------------------------
@@ -1182,14 +1188,14 @@ def spec_total(w, ppv, thistitle, args, logbook):
     t = thistitle + ', for ' + title(args.file) + ' Nebular+ stellar for Om = ' + str(args.Om) + ', res = ' + str(
         logbook.final_pix_size) + ' kpc' + info
     # -------------------------------------------------------------------------------------------
-    plt.title(t)
+    if not args.saveplot: plt.title(t)
     plt.ylabel(cbarlab)
     plt.xlabel('Wavelength (A)')
     plt.ylim(np.min(y) * 0.9, np.max(y) * 1.1)
     plt.xlim(logbook.wmin, logbook.wmax)
     plt.show(block=False)
     if args.saveplot:
-        fig.savefig(args.path + t + '.png')
+        fig.savefig(args.path + t + '.eps')
     if args.debug: plt.show(block=False)
 
 
@@ -1395,8 +1401,8 @@ def spec(args, logbook, properties):
             else:
                 cmax = ''
 
-            command = 'mpirun -np ' + str(args.ncores) + ' python ' + funcname + ' --fitsname ' + logbook.fitsname + \
-                      ' --sig ' + str(logbook.sig) + ' --pow ' + str(args.pow) + ' --size ' + str(
+            command = '/pkg/linux/anaconda/bin/mpirun -np ' + str(args.ncores) + ' python ' + funcname + ' --fitsname ' + logbook.fitsname + \
+                      ' --file ' + args.file + ' --sig ' + str(logbook.sig) + ' --pow ' + str(args.pow) + ' --size ' + str(
                 logbook.size) + ' --ker ' + args.ker + ' --convolved_filename ' + \
                       logbook.convolved_filename + ' --outfile ' + args.outfile + ' --H2R_cubename ' + logbook.H2R_filename + \
                       ' --exptime ' + str(logbook.exptime) + ' --final_pix_size ' + str(
@@ -2099,8 +2105,7 @@ def fixfit(args, logbook, properties):
     plt.plot(wave, flam, c='k', label='Spectrum at ' + str(args.X) + ', ' + str(args.Y))
     plt.plot(wave, flam_u, c='gray', linestyle='dashed', label='Error at ' + str(args.X) + ', ' + str(args.Y))
     scaling = 0.5 * 1e-18 if args.contsub else 1.
-    plt.plot(wave, flam / flam_u * scaling, c='b', alpha=0.3,
-             label='SNRx' + str(scaling) + ' at ' + str(args.X) + ', ' + str(args.Y))
+    #plt.plot(wave, flam / flam_u * scaling, c='b', alpha=0.3, label='SNRx' + str(scaling) + ' at ' + str(args.X) + ', ' + str(args.Y))
     plt.plot(wave, cont, c='g', lw=1, alpha=1, label='Continuum at ' + str(args.X) + ', ' + str(args.Y))
     plt.plot(wave, cont_u, c='cyan', lw=1, alpha=0.8, label='Continuum uncert at ' + str(args.X) + ', ' + str(args.Y))
     for ii in logbook.wlist:
@@ -2108,7 +2113,6 @@ def fixfit(args, logbook, properties):
     plt.ylabel('flam in erg/s/A/pc^2')
     plt.xlabel('Wavelength (A)')
     plt.xlim(logbook.wmin, logbook.wmax)
-    plt.title(logbook.fitsname + '\n' + 'Fitted spectrum at pp ' + str(args.X) + ',' + str(args.Y))
     # plt.ylim(-1e-18,6e-18)
     if args.contsub:
         plt.ylim(-0.2e-18, 1.2e-18)  #
@@ -2117,6 +2121,8 @@ def fixfit(args, logbook, properties):
     # plt.xlim(6555, 6600) #
     # plt.xlim(6705, 6745) #
     plt.legend()
+    if not args.saveplot: plt.title(logbook.fitsname + '\n' + 'Fitted spectrum at pp ' + str(args.X) + ',' + str(args.Y))
+    else: fig.savefig(logbook.fitsname + ':Fitted_spec_at_' + str(args.X) + ',' + str(args.Y)+'.eps')
     if args.hide:
         plt.close()
     else:
@@ -2344,22 +2350,28 @@ def plotmap(map, title, savetitle, cbtitle, args, logbook, makelog=True, addcirc
         map = np.ma.masked_where(a < cmin, map)
         p = ax.imshow(np.transpose(map), cmap='rainbow', vmin=cmin,
                       vmax=cmax)  # transposing map due to make [X,Y] axis of array correspond to [X,Y] axis of plot
-    ax.set_xticklabels([i * logbook.final_pix_size - args.galsize / 2 - args.xcenter_offset for i in
+    ax.set_xticklabels(['%.2F'%(i * logbook.final_pix_size - args.galsize / 2 - args.xcenter_offset) for i in
                         list(ax.get_xticks())])  # xcenter_offset in kpc units
-    ax.set_yticklabels([i * logbook.final_pix_size - args.galsize / 2 - args.ycenter_offset for i in
+    ax.set_yticklabels(['%.2F'%(i * logbook.final_pix_size - args.galsize / 2 - args.ycenter_offset) for i in
                         list(ax.get_yticks())])  # ycenter_offset in kpc units
     plt.ylabel('y(kpc)')
     plt.xlabel('x(kpc)')
-    plt.title(title)
+    if args.file == 'DD0600_lgf': lim = [-11.65,10.7] # in kpc
+    elif args.file == 'DD0600': lim = [-11.65,10.7] # in kpc
+    plt.xlim((np.array(lim)+args.xcenter_offset + args.galsize/2)/logbook.final_pix_size)
+    plt.ylim((np.array(lim)+args.xcenter_offset + args.galsize/2)/logbook.final_pix_size)
+    if not args.saveplot: plt.title(title)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.1)
     plt.colorbar(p, cax=cax).set_label(cbtitle)
     if addcircle_radius:
         circle1 = plt.Circle(((0 + args.xcenter_offset + args.galsize / 2.) / logbook.final_pix_size,
                               (0 + args.ycenter_offset + args.galsize / 2.) / logbook.final_pix_size),
-                             addcircle_radius / logbook.final_pix_size, color='k', fill=False)
+                             addcircle_radius / logbook.final_pix_size, color='k', fill=False, lw=0.3)
         ax.add_artist(circle1)
-    if args.saveplot: fig.savefig(args.path + savetitle + '.png')
+    if args.saveplot:
+        fig.savefig(savetitle + '.eps')
+        print 'Saved file '+savetitle + '.eps' #
     if args.hide:
         plt.close(fig)
     else:
@@ -3308,8 +3320,8 @@ arcsec = ' + str(args.res_arcsec) + '". Also setting no resampling after convolu
                 else:
                     contsub = ''
 
-                funcname = HOME + '/Work/astro/ayan_codes/enzo_model_code/parallel_fitting_old.py'
-                command = 'mpirun -np ' + str(args.ncores) + ' python ' + funcname + ' --fitsname ' + logbook.fitsname + \
+                funcname = HOME + '/Work/astro/ayan_codes/enzo_model_code/parallel_fitting.py'
+                command = '/pkg/linux/anaconda/bin/mpirun -np ' + str(args.ncores) + ' python ' + funcname + ' --fitsname ' + logbook.fitsname + \
                           ' --no_noise_fitsname ' + logbook.no_noise_fitsname + ' --fitsname_u ' + logbook.fitsname_u + ' --nbin ' + str(
                     args.nbin) + \
                           ' --vdel ' + str(args.vdel) + ' --vdisp ' + str(args.vdisp) + ' --vres ' + str(
@@ -3346,5 +3358,4 @@ arcsec = ' + str(args.res_arcsec) + '". Also setting no resampling after convolu
         plt.close()
     else:
         plt.show(block=False)
-    if not args.silent and args.saveplot: myprint('Saved plot here: ' + path + '\n', args)
     myprint('Completed in %s minutes\n' % ((time.time() - start_time) / 60), args)

@@ -57,6 +57,7 @@ if __name__ == '__main__':
     parser.add_argument('--hide', dest='hide', action='store_true')
     parser.set_defaults(hide=False)
 
+    parser.add_argument('--file')
     parser.add_argument('--sig')
     parser.add_argument('--pow')
     parser.add_argument('--size')
@@ -133,7 +134,7 @@ if __name__ == '__main__':
         result[np.log10(np.abs(median)) - np.log10(np.abs(
             result)) > 10.] = 0.  # discarding any resulting pixel that is more than O(10) lower than input data, to avoid round off error pixels
         result = po.rebin(result, (np.shape(convolved_cube)[0], np.shape(convolved_cube)[
-            1]))  ###only if re-sampling convolved cube back to original resolution
+            1]))  ###this line actually matters only if re-sampling convolved cube back to original resolution
         convolved_cube_local[:, :, k] = result
 
         if args.debug and k % slice_slab == 0:

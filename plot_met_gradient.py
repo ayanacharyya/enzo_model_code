@@ -16,7 +16,7 @@ import os
 HOME = os.getenv('HOME') + '/'
 # -----------------------------------------------------------------
 logOHsun = 8.77
-inpath = HOME + 'Desktop/bpt_contsub_nocontu/'
+inpath = HOME + 'Desktop/bpt_contsub_contu_rms/'
 # filename = 'met_grad_log_paint_fixed_SNR.txt' #SNR fixed while generating PPV cube
 # filename = 'met_grad_log_paint_exp_scaled_fixed_noise.txt' #noise level fixed while generating PPV cube
 # filename = 'met_grad_log_paint_exp_scaled_fixed_noise_fitupto2.txt' #noise level fixed while generating PPV cube

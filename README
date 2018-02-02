@@ -1,0 +1,5 @@
+#---Typical command to generate latest PPV cubes---#
+
+python ~/Work/astro/ayan_codes/enzo_model_code/plotobservables.py --addnoise --contsub --smooth --spec_smear --res 0.04 --binto 4 --vres 30 --wmin 6400 --Zgrad 8.77,-0.1 --met --fixed_noise 8 --calc --hide --scale_exptime 1200000 --arc 4.0 --file DD0600_lgf --ncores 83 --multi 1 --path /avatar/acharyya/enzo_models/ppvcubes_fixednoise_contsub_conturms/
+
+Replace arc, vres, fixed_noise, ncores, path accordingly

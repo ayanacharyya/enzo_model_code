@@ -273,7 +273,7 @@ if __name__ == '__main__':
     MAP = fits.open('/Users/acharyya/Desktop/test_slice_253of581.fits')[0].data  # halpha
     initial = galsize / np.shape(MAP)[0]  # cell size in kpc
     MAP *= (initial * 1e3) ** 2  # to change input units ergs/s/pc^2 to ergs/s
-    # MAP2 = fits.open('/Users/acharyya/Desktop/test_slice_284of581.fits')[0].data * (initial*1e3)**2 #to change input units ergs/s/pc^2 to ergs/s #n2
+    MAP2 = fits.open('/Users/acharyya/Desktop/test_slice_284of581.fits')[0].data * (initial*1e3)**2 #to change input units ergs/s/pc^2 to ergs/s #n2
     if not keep: plt.close('all')
 
     fwhm = float(fwhm)
@@ -297,7 +297,7 @@ if __name__ == '__main__':
     print 'congrid: input/output size ratio, final pix per beam=', np.shape(MAPbinconv)[0] / float(
         np.shape(MAPbinconv_unbin)[0]), \
         res_phys / (galsize / np.shape(MAPbinconv_unbin)[0])
-
+    '''
     plotmap(MAP / ((galsize / np.shape(MAP)[0]) * 1e3) ** 2, cmin=cmin, cmax=cmax, title='MAP')
     plotmap(MAPconv / ((galsize / np.shape(MAPconv)[0]) * 1e3) ** 2, cmin=cmin, cmax=cmax,
             title='MAP convolved ppb=' + str(fwhm_base) + ' pix_size=' + str(initial))
@@ -310,13 +310,19 @@ if __name__ == '__main__':
             title='MAP binned x' + str('%.1F' % (intermediate_pix_size / initial)) + ' convolved ppb=' + str(
                 fwhm_sample) + ' pix_size=' + str(galsize / np.shape(MAPbinconv_unbin)[0]) + ' rebinned x' + str(
                 '%.1F' % (final_pix_size / intermediate_pix_size)))
-
+    '''
     plt.figure()
     plt.scatter(get_dist(MAP), np.log10(MAP / ((galsize / np.shape(MAP)[0]) * 1e3) ** 2).flatten(), c='k', lw=0, s=3,
                 label='MAP')
     plt.scatter(get_dist(MAPconv), np.log10(MAPconv / ((galsize / np.shape(MAPconv)[0]) * 1e3) ** 2).flatten(), c='g',
                 lw=0, s=1, label='convolve ppb=' + str(fwhm_base) + ' pix_size=' + str(initial))
+    if 'MAP2' in locals():
+        plt.scatter(get_dist(MAP2), np.log10(MAP2).flatten(), c='brown', lw=0, s=3, label='MAP2')
+        MAPconv2 = convolve(MAP2, fwhm_base)
+        plt.scatter(get_dist(MAPconv2), np.log10(MAPconv2).flatten(), c='r', lw=0, s=1,
+                    label='convolve ppb=' + str(fwhm_base) + ' pix_size=' + str(initial))
 
+    '''
     plt.scatter(get_dist(MAPbin), np.log10(MAPbin / ((galsize / np.shape(MAPbin)[0]) * 1e3) ** 2).flatten(), c='b',
                 lw=0, s=1, label='bin')
     plt.scatter(get_dist(MAPbinconv), np.log10(MAPbinconv / ((galsize / np.shape(MAPbinconv)[0]) * 1e3) ** 2).flatten(),
@@ -325,7 +331,7 @@ if __name__ == '__main__':
     plt.scatter(get_dist(MAPbinconv_unbin),
                 np.log10(MAPbinconv_unbin / ((galsize / np.shape(MAPbinconv_unbin)[0]) * 1e3) ** 2).flatten(), c='y',
                 lw=0, s=1, label='bin-> convolved-> unbin')
-
+    '''
     plt.xlabel('r(kpc)')
     plt.ylabel('log(flux)')
     plt.ylim(-40, -10)
@@ -337,7 +343,7 @@ if __name__ == '__main__':
 
     if 'MAP2' in locals():
         ratio = MAP2 / MAP
-        MAPconv2 = convolve(MAP2, fwhm_base)
+        #MAPconv2 = convolve(MAP2, fwhm_base)
         ratioconv = MAPconv2 / MAPconv
         ratio = np.ma.masked_where((~np.isfinite(ratio)) | (ratio <= 0.), ratio)
         ratioconv = np.ma.masked_where((~np.isfinite(ratioconv)) | (ratioconv <= 0.), ratioconv)
@@ -350,11 +356,11 @@ if __name__ == '__main__':
         mydiag(MAPconv, 'MAPconv')
         mydiag(MAPconv2, 'MAPconv2')
         mydiag(ratioconv, 'ratioconv')
-
+        '''
         plotmap(MAP2 / ((galsize / np.shape(MAP2)[0]) * 1e3) ** 2, cmin=cmin, cmax=cmax, title='MAP2')
         plotmap(MAPconv2 / ((galsize / np.shape(MAPconv2)[0]) * 1e3) ** 2, cmin=cmin, cmax=cmax,
                 title='MAP2 convolved ppb=' + str(fwhm_base) + ' pix_size=' + str(initial))
-
+        
         plt.figure()
         plt.scatter(get_dist(MAP2), np.log10(MAP2).flatten(), c='k', lw=0, s=3, label='MAP2')
         plt.scatter(get_dist(MAPconv2), np.log10(MAPconv2).flatten(), c='g', lw=0, s=1,
@@ -366,13 +372,13 @@ if __name__ == '__main__':
         lg = plt.legend(loc="lower left")
         for ind in range(len(lg.legendHandles)): lg.legendHandles[ind]._sizes = [30]
         plt.show(block=False)
-
+        
         plotmap(ratio, title='MAP2/MAP', makelog=False)
         plotmap(ratioconv, title='MAP2/MAP convolved ppb=' + str(fwhm_base) + ' pix_size=' + str(initial),
                 makelog=False)
-
+        '''
         plt.figure()
-        plt.scatter(get_dist(MAP), ratio, c='k', lw=0, s=3, label='MAP2/MAP')
+        plt.scatter(get_dist(MAP), 1./ratio, c='k', lw=0, s=3, label='MAP2/MAP')
         plt.scatter(get_dist(MAP), ratioconv, c='g', lw=0, s=1,
                     label='after convolve ppb=' + str(fwhm_base) + ' pix_size=' + str(initial))
         plt.xlabel('r(kpc)')
