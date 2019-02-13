@@ -18,6 +18,7 @@ from scipy.optimize import curve_fit
 from mpi4py import MPI
 from astropy.io import fits
 import argparse as ap
+import subprocess
 
 parser = ap.ArgumentParser(description="parallel cube line-fitting tool")
 
@@ -25,7 +26,7 @@ parser = ap.ArgumentParser(description="parallel cube line-fitting tool")
 # -------------------------------------------------------------------------------------------
 def print_mpi(string, args):
     comm = MPI.COMM_WORLD
-    po.myprint('[' + str(comm.rank) + '] ' + string + '\n', args)
+    po.myprint('[' + str(comm.rank) + '] {'+subprocess.check_output(['uname -n'],shell=True)[:-1]+'} ' + string + '\n', args)
 
 
 def print_master(string, args):
@@ -45,8 +46,8 @@ if __name__ == '__main__':
     parser.set_defaults(toscreen=False)
     parser.add_argument('--debug', dest='debug', action='store_true')
     parser.set_defaults(debug=False)
-    parser.add_argument('--showplot', dest='showplot', action='store_true')
-    parser.set_defaults(showplot=False)
+    parser.add_argument('--showfit', dest='showfit', action='store_true')
+    parser.set_defaults(showfit=False)
     parser.add_argument('--addnoise', dest='addnoise', action='store_true')
     parser.set_defaults(addnoise=False)
     parser.add_argument('--contsub', dest='contsub', action='store_true')
@@ -98,8 +99,6 @@ if __name__ == '__main__':
     x = np.shape(properties.ppvcube)[0]
     y = np.shape(properties.ppvcube)[1]
     ncells = x * y
-    properties.mapcube = np.zeros((x, y, len(logbook.wlist)))
-    properties.errorcube = np.zeros((x, y, len(logbook.wlist)))
     logbook.resoln = po.c / args.vres if args.spec_smear else po.c / args.vdisp
 
     comm = MPI.COMM_WORLD
@@ -107,18 +106,25 @@ if __name__ == '__main__':
     rank = comm.rank
     print_master('Total number of MPI ranks = ' + str(ncores) + '. Starting at: {:%Y-%m-%d %H:%M:%S}'.format(
         datetime.datetime.now()), args)
-    mapcube_local = np.zeros(np.shape(properties.mapcube))
-    errorcube_local = np.zeros(np.shape(properties.errorcube))
+    mapcube_local = np.zeros((x, y, len(logbook.wlist)))
+    errorcube_local = np.zeros((x, y, len(logbook.wlist)))
     comm.Barrier()
     t_start = MPI.Wtime()  ### Start stopwatch ###
 
-    core_start = rank * (ncells / ncores)
-    core_end = (rank + 1) * (ncells / ncores)
-    if (rank == ncores - 1): core_end = ncells  # last PE gets the rest
-    if args.debug: print_mpi(
-        'Operating on cell ' + str(core_start) + ' to ' + str(core_end) + ' out of ' + str(ncells) + ' cells', args)
+    # domain decomposition
+    split_at_cpu = ncells - ncores*(ncells/ncores)
+    nper_cpu1 = (ncells / ncores)
+    nper_cpu2 = nper_cpu1 + 1
+    if rank < split_at_cpu:
+        core_start = rank * nper_cpu2
+        core_end = (rank+1) * nper_cpu2 - 1
+    else:
+        core_start = split_at_cpu * nper_cpu2 + (rank - split_at_cpu) * nper_cpu1
+        core_end = split_at_cpu * nper_cpu2 + (rank - split_at_cpu + 1) * nper_cpu1 - 1
 
-    for k in range(core_start, core_end):
+    print_mpi('Operating on cell ' + str(core_start) + ' to ' + str(core_end) + ': '+str(core_end-core_start+1)+' out of ' + str(ncells) + ' cells', args)
+
+    for k in range(core_start, core_end+1):
         i, j = k / x, k % x
         wave = np.array(properties.dispsol)  # converting to numpy arrays
         flam = np.array(properties.ppvcube[i, j, :])  # in units ergs/s/A/pc^2
@@ -160,27 +166,26 @@ if __name__ == '__main__':
                 np.std(flam)) + ',' + \
                       str(np.max(flam)) + ',' + str(np.min(flam)) + '\n', args)
 
-        mapcube_local[i, j, :], errorcube_local[i, j, :] = po.fit_all_lines(args, logbook, wave, flam, flam_u, cont, i,
-                                                                            j, z=0., z_err=0.0001)
-        if not args.silent: print_mpi(
-            'Fitted cell ' + str(k) + ' i.e. cell ' + str(i) + ',' + str(j) + ' of ' + str(core_end) + \
-            ' cells at: {:%Y-%m-%d %H:%M:%S}'.format(datetime.datetime.now()), args)
+        mapcube_local[i, j, :], errorcube_local[i, j, :] = po.fit_all_lines(args, logbook, wave, flam, flam_u, cont, i, j, z=0., z_err=0.0001)
+        if not args.silent: print_mpi('Fitted cell ' + str(k) + ' i.e. cell ' + str(i) + ',' + str(j) + ' of ' + str(core_end) + \
+                                      ' cells at: {:%Y-%m-%d %H:%M:%S}'.format(datetime.datetime.now()), args)
+
     comm.Barrier()
-    comm.Allreduce(mapcube_local, properties.mapcube, op=MPI.SUM)
-    comm.Allreduce(errorcube_local, properties.errorcube, op=MPI.SUM)
+    comm.Allreduce(MPI.IN_PLACE, mapcube_local, op=MPI.SUM)
+    comm.Allreduce(MPI.IN_PLACE, errorcube_local, op=MPI.SUM)
 
     if rank == 0:
         if args.debug:
             po.myprint('Deb120: Trying to calculate some statistics on the cube of shape (' + str(
-                np.shape(properties.mapcube)[0]) + ',' + str(np.shape(properties.mapcube)[1]) + ',' + str(
-                np.shape(properties.mapcube)[2]) + '), please wait...', args)
-            po.mydiag('Deb121: in ergs/s/pc^2: for mapcube', properties.mapcube, args)
+                np.shape(mapcube_local)[0]) + ',' + str(np.shape(mapcube_local)[1]) + ',' + str(
+                np.shape(mapcube_local)[2]) + '), please wait...', args)
+            po.mydiag('Deb121: in ergs/s/pc^2: for mapcube', mapcube_local, args)
             po.myprint('Deb120: Trying to calculate some statistics on the cube of shape (' + str(
-                np.shape(properties.errorcube)[0]) + ',' + str(np.shape(properties.errorcube)[1]) + ',' + str(
-                np.shape(properties.errorcube)[2]) + '), please wait...', args)
-            po.mydiag('Deb121: in ergs/s/pc^2: for mapcube', properties.errorcube, args)
-        po.write_fits(logbook.fittedcube, properties.mapcube, args)
-        po.write_fits(logbook.fittederror, properties.errorcube, args)
+                np.shape(errorcube_local)[0]) + ',' + str(np.shape(errorcube_local)[1]) + ',' + str(
+                np.shape(errorcube_local)[2]) + '), please wait...', args)
+            po.mydiag('Deb121: in ergs/s/pc^2: for mapcube', errorcube_local, args)
+        po.write_fits(logbook.fittedcube, mapcube_local, args)
+        po.write_fits(logbook.fittederror, errorcube_local, args)
 
     t_diff = MPI.Wtime() - t_start  ### Stop stopwatch ###
     print_master(

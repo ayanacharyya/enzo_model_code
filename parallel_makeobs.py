@@ -18,12 +18,13 @@ import argparse as ap
 parser = ap.ArgumentParser(description="parallel makeobservable/addnoise tool")
 from astropy.io import fits
 from matplotlib import pyplot as plt
+import subprocess
 
 
 # -------------------------------------------------------------------------------------------
 def print_mpi(string, args):
     comm = MPI.COMM_WORLD
-    po.myprint('[' + str(comm.rank) + '] ' + string + '\n', args)
+    po.myprint('[' + str(comm.rank) + '] {'+subprocess.check_output(['uname -n'],shell=True)[:-1]+'} ' + string + '\n', args)
 
 
 def print_master(string, args):
@@ -75,6 +76,7 @@ if __name__ == '__main__':
     parser.add_argument('--fixed_noise')
     parser.add_argument('--scale_exp_SNR')
     parser.add_argument('--galsize')
+    parser.add_argument('--center')
     parser.add_argument('--cmin')
     parser.add_argument('--cmax')
     parser.add_argument('--snr_cmin')
@@ -87,6 +89,7 @@ if __name__ == '__main__':
     parser.add_argument('--multi_realisation')
     parser.add_argument('--xcenter_offset')
     parser.add_argument('--ycenter_offset')
+    parser.add_argument('--flux_ratio')
     args, leftovers = parser.parse_known_args()
     args.vdel = float(args.vdel)
     args.vdisp = float(args.vdisp)
@@ -97,6 +100,7 @@ if __name__ == '__main__':
     args.el_per_phot = float(args.epp)
     args.gain = float(args.gain)
     args.galsize = float(args.galsize)
+    args.center = float(args.center)
     args.rad = float(args.rad)
     args.multi_realisation = int(args.multi_realisation)
     args.xcenter_offset = float(args.xcenter_offset)
@@ -128,6 +132,7 @@ if __name__ == '__main__':
 
     properties = po.get_disp_array(args, logbook, properties)
     properties.dist = float(args.dist)
+    properties.flux_ratio = float(args.flux_ratio)
     if args.addnoise and not args.noskynoise:
         properties.skynoise = fits.open(logbook.skynoise_cubename)[0].data
         print_master('Reading existing skynoise cube from ' + logbook.skynoise_cubename + '\n', args)
@@ -136,8 +141,6 @@ if __name__ == '__main__':
 
     cube = fits.open(args.last_cubename)[0].data
     nslice = np.shape(cube)[2]
-    ppv = np.zeros(np.shape(cube))
-    ppv_u = np.zeros(np.shape(cube))
 
     if args.parallel:
         comm = MPI.COMM_WORLD
@@ -146,12 +149,19 @@ if __name__ == '__main__':
         print_master('Making ' + str(nslice) + ' slices to observables, in parallel...', args)
         print_master('Total number of MPI ranks = ' + str(ncores) + '. Starting at: {:%Y-%m-%d %H:%M:%S}'.format(
             datetime.datetime.now()), args)
-        core_start = rank * (nslice / ncores)
-        core_end = (rank + 1) * (nslice / ncores)
-        if (rank == ncores - 1): core_end = nslice  # last PE gets the rest
-        if args.debug: print_mpi(
-            'Operating on slice ' + str(core_start) + ' to ' + str(core_end) + ' out of ' + str(nslice) + ' cells',
-            args)
+
+        # domain decomposition
+        split_at_cpu = nslice - ncores * (nslice / ncores)
+        nper_cpu1 = (nslice / ncores)
+        nper_cpu2 = nper_cpu1 + 1
+        if rank < split_at_cpu:
+            core_start = rank * nper_cpu2
+            core_end = (rank + 1) * nper_cpu2 - 1
+        else:
+            core_start = split_at_cpu * nper_cpu2 + (rank - split_at_cpu) * nper_cpu1
+            core_end = split_at_cpu * nper_cpu2 + (rank - split_at_cpu + 1) * nper_cpu1 - 1
+
+        print_mpi('Operating on slice ' + str(core_start) + ' to ' + str(core_end) + ': '+str(core_end-core_start+1)+' out of ' + str(nslice) + ' cells',args)
         prefix = '[' + str(rank) + '] '
 
         comm.Barrier()
@@ -161,12 +171,12 @@ if __name__ == '__main__':
                                                    prefix)  # performing operation on cube
 
         comm.Barrier()
-        comm.Allreduce(ppv_local, ppv, op=MPI.SUM)
-        comm.Allreduce(ppv_u_local, ppv_u, op=MPI.SUM)
+        comm.Allreduce(MPI.IN_PLACE, ppv_local, op=MPI.SUM)
+        comm.Allreduce(MPI.IN_PLACE, ppv_u_local, op=MPI.SUM)
         if rank == 0:
-            ppv = np.ma.masked_where(ppv < 0., ppv)
-            po.write_fits(logbook.fitsname, ppv, args)
-            po.write_fits(logbook.fitsname_u, ppv_u, args)
+            ppv_local = np.ma.masked_where(ppv_local < 0., ppv_local)
+            po.write_fits(logbook.fitsname, ppv_local, args)
+            po.write_fits(logbook.fitsname_u, ppv_u_local, args)
 
         t_diff = MPI.Wtime() - t_start  ### Stop stopwatch ###
         print_master('Parallely: time taken for make-observable of ' + str(nslice) + ' slices with ' + str(
